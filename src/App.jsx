@@ -270,6 +270,10 @@ function transformAppleHealthData(json) {
         : startHour < 9 ? "morning" : startHour < 12 ? "late-morning"
         : startHour < 15 ? "midday" : startHour < 18 ? "afternoon" : "evening";
       const isoTimestamp = startDate.toISOString();
+      // Extract weather data
+      const ew = w.enriched_weather;
+      const temperature = ew?.temperature ?? null;
+      const humidity = ew?.humidity ?? null;
       workouts.push({
         id: `run-${isoTimestamp}-${workouts.length}`,
         date: dateStr,
@@ -295,6 +299,8 @@ function transformAppleHealthData(json) {
         timeOfDay,
         splits,
         paceSec: paceToSec(pace),
+        temperature,
+        humidity,
       });
     } catch (err) {
       console.warn("Error processing workout:", err, w);
@@ -347,7 +353,8 @@ function WeeklySummaryAI({ weekData, allData }) {
   const [error, setError]   = useState(null);
   const quote = useMemo(() => getTodayQuote(), []);
 
-  const weekKey = weekData?.monDate || getMondayOf(new Date().toISOString().slice(0,10));
+  const todayDate = new Date().toISOString().slice(0,10);
+  const weekKey = `${weekData?.monDate || getMondayOf(new Date().toISOString().slice(0,10))}_${todayDate}`;
   const cached  = cache[weekKey];
 
   useEffect(() => {
@@ -399,7 +406,7 @@ function WeeklySummaryAI({ weekData, allData }) {
       ) : (
         <div>
           <p style={{color:C.darkGray,fontSize:16,lineHeight:1.85,margin:"0 0 5px"}}>{cached.text}</p>
-          <p style={{color:C.midGray,fontSize:13,margin:0}}>Generated {new Date(cached.timestamp).toLocaleDateString("en-US",{month:"short",day:"numeric"})} · refreshes each week</p>
+          <p style={{color:C.midGray,fontSize:13,margin:0}}>Generated {new Date(cached.timestamp).toLocaleDateString("en-US",{month:"short",day:"numeric"})} · refreshes daily</p>
         </div>
       )}
     </div>
@@ -987,13 +994,27 @@ export default function Dashboard() {
   }, [withHR]);
 
   // GAP (Grade-Adjusted Pace) adjusted version of paceZoneStats
-  // Removes elevation penalty so hilly runs compare fairly to flat runs
+  // Removes elevation penalty AND accounts for heat/humidity stress
   const gapPaceZoneStats = useMemo(() => {
     const adjusted = withHR.map(r => {
       let adjPace = r.paceSec;
+      // Elevation adjustment: +7% per 100 ft/mi
       if (r.elev && r.dist && r.dist > 0) {
         const ftPerMile = r.elev / kmToMi(r.dist);
         adjPace = r.paceSec / (1 + (ftPerMile / 100) * 0.07);
+      }
+      // Weather adjustment: heat & humidity inflate HR, making pace look slower
+      // Apply reverse correction to pace so hot-day runs compare fairly
+      if (r.temperature != null && r.humidity != null) {
+        const tempF = r.temperature;
+        const hum = r.humidity;
+        // Heat index effect on pace: each 5°F above 60°F adds ~1% difficulty
+        // Humidity > 60% adds additional ~0.5% per 10% humidity above 60%
+        const tempPenalty = tempF > 60 ? ((tempF - 60) / 5) * 0.01 : 0;
+        const humPenalty  = hum > 60 ? ((hum - 60) / 10) * 0.005 : 0;
+        const totalPenalty = tempPenalty + humPenalty;
+        // Normalize pace to neutral conditions (remove weather penalty)
+        adjPace = adjPace / (1 + totalPenalty);
       }
       return { ...r, paceSec: adjPace };
     });
@@ -1488,6 +1509,9 @@ export default function Dashboard() {
                   <p style={{ color:"rgba(255,255,255,0.6)", fontSize:11, letterSpacing:"0.1em", textTransform:"uppercase", margin:"0 0 4px", fontWeight:600 }}>Countdown</p>
                   <p style={{ color:C.white, fontSize: isMob ? 26 : 33, fontWeight:900, margin:0, lineHeight:1 }}>{daysToRace}</p>
                   <p style={{ color:"rgba(255,255,255,0.5)", fontSize:12, margin:"2px 0 0" }}>days</p>
+                  <p style={{ color:"rgba(255,255,255,0.4)", fontSize:10, margin:"4px 0 0", letterSpacing:"0.04em" }}>
+                    {TODAY.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}
+                  </p>
                 </div>
                 <div style={{ width:1, height:30, background:"rgba(255,255,255,0.2)" }} />
                 <div style={{ flex:1 }}>
@@ -1522,15 +1546,18 @@ export default function Dashboard() {
             const peakHRDate = peakHRRun ? fmtDate(peakHRRun.date) : null;
             const peakHRLabel = hasRealMaxHR ? "Peak Max HR" : "Peak Avg HR";
             const peakHRSub = peakHRDate ? `${hasRealMaxHR ? "max" : "avg"} bpm · ${peakHRDate}` : "all-time high";
+            const totalTrainingMinutes = runs.reduce((s, r) => s + (r.movingTimeSec ? r.movingTimeSec / 60 : 0), 0);
+            const totalHours = Math.floor(totalTrainingMinutes / 60);
             const heroStats = [
               { label: "Total Miles", value: totalMi, unit: "mi", sub: `${runs.length} runs all-time` },
               { label: "Longest Run", value: longestRunAllTime ? +kmToMi(longestRunAllTime.dist).toFixed(1) : "—", unit: "mi", sub: longestRunAllTime ? fmtDate(longestRunAllTime.date) : "—" },
               { label: "Best Mile", value: allTimeBestMile ? paceSecToLabel(allTimeBestMile.sec) : "—", unit: "/mi", sub: allTimeBestMile ? fmtDate(allTimeBestMile.date) : "all-time fastest" },
               { label: peakHRLabel, value: peakHR ?? "—", unit: "bpm", sub: peakHRSub },
               { label: "Elevation", value: totalFt.toLocaleString(), unit: "ft", sub: "all-time climbing" },
+              { label: "Time on Feet", value: totalHours, unit: "hrs", sub: `${runs.length} runs · avg ${totalHours && runs.length ? Math.round(totalHours/runs.length*60) : "—"} min/run` },
             ];
             return (
-              <div style={{ display:"grid", gridTemplateColumns: isMob ? "repeat(3,1fr)" : "repeat(5,1fr)", gap: isMob ? 8 : 12 }}>
+              <div style={{ display:"grid", gridTemplateColumns: isMob ? "repeat(3,1fr)" : "repeat(6,1fr)", gap: isMob ? 8 : 12 }}>
                 {heroStats.map(s => (
                   <div key={s.label} style={{ background:"rgba(255,255,255,0.12)", backdropFilter:"blur(12px)", borderRadius:8, padding:"12px 14px", border:"1px solid rgba(255,255,255,0.2)" }}>
                     <p style={{ color:"rgba(255,255,255,0.65)", fontSize:11, letterSpacing:"0.13em", textTransform:"uppercase", margin:"0 0 4px", fontWeight:600 }}>{s.label}</p>
@@ -1740,7 +1767,7 @@ export default function Dashboard() {
               const zones = afpMode === 'gap' ? gapPaceZoneStats : paceZoneStats;
               return (
             <section style={{ marginBottom: isMob ? 32 : 48 }}>
-              <SecTitle title="Aerobic Fitness Profile" color={C.red}
+              <SecTitle title="Aerobic Fitness Profile" color={C.navy}
                 toggleOptions={[{id:'raw',label:'Raw Pace'},{id:'gap',label:'GAP Adjusted'}]}
                 toggleValue={afpMode} onToggle={setAfpMode} />
               <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
@@ -1751,7 +1778,7 @@ export default function Dashboard() {
                     </p>
                     {afpMode==='gap' && (
                       <p style={{ color:C.midGray, fontSize:12, margin:0, fontStyle:"italic" }}>
-                        Pace buckets use GAP (Grade Adjusted Pace): each run's pace is normalized to flat-ground equivalent using +7% per 100 ft/mi elevation. Removes the HR penalty of hilly terrain.
+                        Pace buckets use GAP (Grade Adjusted Pace): each run's pace is normalized to flat-ground equivalent using +7% per 100 ft/mi elevation. Heat/humidity penalty is also removed (runs above 60°F and/or high humidity adjusted back to neutral conditions) so hot-day efforts compare fairly.
                       </p>
                     )}
                   </div>
@@ -2299,24 +2326,69 @@ export default function Dashboard() {
                 Best recent efforts from the last 25 runs, projected using the Riegel formula (T₂ = T₁ × (D₂/D₁)^1.06). Longer source runs yield more accurate marathon predictions.
               </p>
 
-              {/* Marathon finish hero card */}
-              <div style={{ background:`linear-gradient(108deg,${C.navy} 0%,#1a3a7a 100%)`, borderRadius:12, padding:"22px 28px", marginBottom:20, boxShadow:"0 8px 24px rgba(1,33,105,0.2)", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:16 }}>
-                <div>
-                  <p style={{ color:"rgba(255,255,255,0.6)", fontSize:12, fontWeight:700, letterSpacing:"0.12em", textTransform:"uppercase", margin:"0 0 6px" }}>Projected Marathon Finish</p>
-                  <p style={{ color:C.white, fontSize:50, fontWeight:900, margin:"0 0 4px", lineHeight:1, letterSpacing:"-0.03em" }}>
-                    {criticalPaceData.marathonFinish ?? "—"}
-                  </p>
-                  <p style={{ color:"rgba(255,255,255,0.5)", fontSize:13, margin:0 }}>
-                    {criticalPaceData.mpZone && `Target MP: ${criticalPaceData.mpZone}/mi · `}
-                    {criticalPaceData.predSource ? `Based on ${criticalPaceData.predSource}` : "Add longer runs to unlock"}
-                  </p>
-                </div>
-                <div style={{ textAlign:"right" }}>
-                  <p style={{ color:"rgba(255,255,255,0.5)", fontSize:11, fontWeight:600, letterSpacing:"0.1em", textTransform:"uppercase", margin:"0 0 4px" }}>Race Day</p>
-                  <p style={{ color:C.white, fontSize:17, fontWeight:700, margin:0 }}>Oct 11, 2026</p>
-                  <p style={{ color:"rgba(255,255,255,0.45)", fontSize:12, margin:"4px 0 0" }}>Chicago Marathon · 7:30am start</p>
-                </div>
-              </div>
+              {/* Marathon finish hero card with Diddy tracker */}
+              {(() => {
+                const DIDDY_SEC = 4*3600 + 14*60 + 52; // 4:14:52
+                const DIDDY_FMT = "4:14:52";
+                const marathonSec = (() => {
+                  const f = criticalPaceData.marathonFinish;
+                  if (!f || f === "—") return null;
+                  const parts = f.split(":").map(Number);
+                  if (parts.length === 3) return parts[0]*3600 + parts[1]*60 + parts[2];
+                  if (parts.length === 2) return parts[0]*3600 + parts[1]*60;
+                  return null;
+                })();
+                const aheadOfDiddy = marathonSec != null && marathonSec < DIDDY_SEC;
+                const diffSec = marathonSec != null ? Math.abs(marathonSec - DIDDY_SEC) : null;
+                const fmtDiff = diffSec != null ? `${Math.floor(diffSec/3600)}h ${Math.floor((diffSec%3600)/60)}m ${diffSec%60}s` : null;
+                return (
+                  <div style={{ background:`linear-gradient(108deg,${C.navy} 0%,#1a3a7a 100%)`, borderRadius:12, padding: isMob ? "18px 20px" : "22px 28px", marginBottom:20, boxShadow:"0 8px 24px rgba(1,33,105,0.2)" }}>
+                    <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", flexWrap:"wrap", gap:16, marginBottom:16 }}>
+                      <div>
+                        <p style={{ color:"rgba(255,255,255,0.6)", fontSize:12, fontWeight:700, letterSpacing:"0.12em", textTransform:"uppercase", margin:"0 0 6px" }}>Projected Marathon Finish</p>
+                        <p style={{ color:C.white, fontSize: isMob ? 38 : 50, fontWeight:900, margin:"0 0 4px", lineHeight:1, letterSpacing:"-0.03em" }}>
+                          {criticalPaceData.marathonFinish ?? "—"}
+                        </p>
+                        <p style={{ color:"rgba(255,255,255,0.5)", fontSize:13, margin:0 }}>
+                          {criticalPaceData.mpZone && `Target MP: ${criticalPaceData.mpZone}/mi · `}
+                          {criticalPaceData.predSource ? `Based on ${criticalPaceData.predSource}` : "Add longer runs to unlock"}
+                        </p>
+                      </div>
+                      <div style={{ textAlign:"right", flexShrink:0 }}>
+                        <p style={{ color:"rgba(255,255,255,0.5)", fontSize:11, fontWeight:600, letterSpacing:"0.1em", textTransform:"uppercase", margin:"0 0 4px" }}>Race Day</p>
+                        <p style={{ color:C.white, fontSize:17, fontWeight:700, margin:0 }}>Oct 11, 2026</p>
+                        <p style={{ color:"rgba(255,255,255,0.45)", fontSize:12, margin:"4px 0 0" }}>Chicago Marathon · 7:30am start</p>
+                      </div>
+                    </div>
+                    {/* Diddy tracker */}
+                    <div style={{
+                      background: marathonSec == null ? "rgba(255,255,255,0.08)" : aheadOfDiddy ? "rgba(0,122,61,0.25)" : "rgba(199,80,0,0.25)",
+                      border: `1px solid ${marathonSec == null ? "rgba(255,255,255,0.15)" : aheadOfDiddy ? "rgba(0,200,100,0.4)" : "rgba(255,160,60,0.4)"}`,
+                      borderRadius:10, padding:"14px 18px", display:"flex", alignItems:"center", gap:16, flexWrap:"wrap"
+                    }}>
+                      <div style={{ fontSize: isMob ? 28 : 36, lineHeight:1 }}>
+                        {marathonSec == null ? "🏃" : aheadOfDiddy ? "🏆" : "😤"}
+                      </div>
+                      <div style={{ flex:1, minWidth:160 }}>
+                        <p style={{ color:"rgba(255,255,255,0.85)", fontSize: isMob ? 14 : 15, fontWeight:700, margin:"0 0 3px" }}>
+                          {marathonSec == null
+                            ? "Can you outrun Diddy?"
+                            : aheadOfDiddy
+                            ? `✓ On pace to outrun Diddy by ${fmtDiff}!`
+                            : `Currently ${fmtDiff} behind Diddy's pace`}
+                        </p>
+                        <p style={{ color:"rgba(255,255,255,0.5)", fontSize:12, margin:0 }}>
+                          Diddy ran NYC Marathon in {DIDDY_FMT} · Keep training 🎯
+                        </p>
+                      </div>
+                      <div style={{ textAlign:"right", flexShrink:0 }}>
+                        <p style={{ color:"rgba(255,255,255,0.5)", fontSize:11, textTransform:"uppercase", letterSpacing:"0.1em", fontWeight:600, margin:"0 0 2px" }}>Diddy's Time</p>
+                        <p style={{ color: aheadOfDiddy ? "#6ef0a0" : "#ffaa60", fontSize: isMob ? 20 : 24, fontWeight:900, margin:0, lineHeight:1, letterSpacing:"-0.02em" }}>{DIDDY_FMT}</p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Best efforts grid */}
               <div style={{ display:"grid", gridTemplateColumns: isMob ? "repeat(2,1fr)" : "repeat(3,1fr)", gap:14, marginBottom:20 }}>
@@ -2448,27 +2520,37 @@ export default function Dashboard() {
                         <p style={{ color:C.midGray, fontSize:13, margin:"0 0 16px", lineHeight:1.5 }}>
                           Performance split by start time. Most runners see HR run 2–5 bpm higher in the morning at equivalent effort (cardiac vagal tone effect). Your morning data is your most race-relevant benchmark since Chicago starts at 7:30am.
                         </p>
-                        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(170px,1fr))", gap:12 }}>
+                        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
                           {timeOfDayStats.map(s => {
                             const paceLabel = s.avgPaceSec ? paceSecToLabel(Math.round(s.avgPaceSec)) : null;
                             const isRaceTime = s.id === "morning";
+                            const maxMiles = Math.max(...timeOfDayStats.map(x=>x.totalMiles),1);
+                            const barPct = Math.round((s.totalMiles/maxMiles)*100);
                             return (
                               <div key={s.id} style={{
-                                background:C.white, border:`1px solid ${C.border}`,
-                                borderTop:`3px solid ${isRaceTime?C.red:s.color}`,
-                                borderRadius:8, padding:"16px 18px",
-                                boxShadow:isRaceTime?`0 0 0 2px ${C.red}22, 0 4px 12px rgba(1,33,105,0.08)`:"0 2px 8px rgba(1,33,105,0.05)",
+                                background:C.white, border:`1px solid ${isRaceTime?C.red:C.border}`,
+                                borderLeft:`4px solid ${isRaceTime?C.red:s.color}`,
+                                borderRadius:8, padding:"12px 14px",
+                                boxShadow:isRaceTime?`0 0 0 2px ${C.red}15`:"none",
                               }}>
-                                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
-                                  <p style={{ color:C.midGray, fontSize:12, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", margin:0 }}>{s.label}</p>
-                                  {isRaceTime && <span style={{ fontSize:10, fontWeight:700, color:C.red, border:`1px solid ${C.red}`, borderRadius:3, padding:"1px 5px" }}>RACE TIME</span>}
+                                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8, flexWrap:"wrap", gap:6 }}>
+                                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                                    <div style={{ width:10, height:10, borderRadius:"50%", background:isRaceTime?C.red:s.color }} />
+                                    <p style={{ color:C.darkGray, fontSize:14, fontWeight:700, margin:0 }}>{s.label}</p>
+                                    <p style={{ color:C.midGray, fontSize:11, margin:0 }}>{s.hours}</p>
+                                    {isRaceTime && <span style={{ fontSize:10, fontWeight:700, color:C.red, border:`1px solid ${C.red}`, borderRadius:3, padding:"1px 5px" }}>RACE TIME</span>}
+                                  </div>
+                                  <div style={{ display:"flex", gap:14, alignItems:"center" }}>
+                                    <span style={{ color:s.color, fontSize:18, fontWeight:800, lineHeight:1 }}>{s.count}<span style={{ color:C.midGray, fontSize:11, fontWeight:400, marginLeft:2 }}>runs</span></span>
+                                    {s.avgHR && <span style={{ color:s.avgHR>165?C.red:s.avgHR>150?C.amber:C.green, fontSize:13, fontWeight:700 }}>{s.avgHR} bpm</span>}
+                                    {paceLabel && <span style={{ color:C.midGray, fontSize:12 }}>{paceLabel}/mi</span>}
+                                  </div>
                                 </div>
-                                <p style={{ color:C.midGray, fontSize:12, margin:"0 0 8px" }}>{s.hours}</p>
-                                <p style={{ color:s.color, fontSize:24, fontWeight:800, margin:"0 0 2px", lineHeight:1 }}>{s.count}<span style={{ fontSize:13, fontWeight:400, color:C.midGray, marginLeft:2 }}>runs</span></p>
-                                <p style={{ color:C.midGray, fontSize:13, margin:"0 0 8px" }}>{s.totalMiles} mi total · {s.avgMiles} mi avg</p>
-                                <div style={{ borderTop:`1px solid ${C.light}`, paddingTop:8 }}>
-                                  {s.avgHR && <Row label="Avg HR" value={`${s.avgHR} bpm`} color={s.avgHR>165?C.red:s.avgHR>150?C.amber:C.green} />}
-                                  {paceLabel && <Row label="Avg pace" value={`${paceLabel}/mi`} />}
+                                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                                  <div style={{ flex:1, height:6, background:C.light, borderRadius:3, overflow:"hidden" }}>
+                                    <div style={{ height:"100%", width:`${barPct}%`, background:isRaceTime?C.red:s.color, borderRadius:3 }} />
+                                  </div>
+                                  <span style={{ color:C.midGray, fontSize:11, flexShrink:0 }}>{s.totalMiles} mi</span>
                                 </div>
                               </div>
                             );
