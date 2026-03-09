@@ -260,7 +260,21 @@ function transformAppleHealthData(json, debugCallback) {
     const actType = w.activity_type ?? w.workoutActivityType ?? w.activityType ?? "";
     if (!RUNNING_TYPES.has(actType)) return;
     try {
-      const startDate = w.start_date ? new Date(w.start_date) : new Date();
+      // ── ROBUST DATE PARSING (Safari-safe) ─────────────────────────────────
+      let startDate;
+      if (w.start_date) {
+        let ds = w.start_date.trim().replace(' ', 'T');           // "2026-01-02 18:19:19 -0400" → "2026-01-02T18:19:19-0400"
+        ds = ds.replace(/ ([+-]\d{4})$/, '$1');                   // clean any leftover space
+        startDate = new Date(ds);
+
+        if (isNaN(startDate.getTime())) {
+          console.warn("Date parse failed on mobile:", w.start_date);
+          startDate = new Date(); // fallback
+        }
+      } else {
+        startDate = new Date();
+      }
+      // ─────────────────────────────────────────────────────────────────────
       const dateStr = startDate.toISOString().slice(0, 10);
       const distStat = w.statistics?.find(s => s.type === 'HKQuantityTypeIdentifierDistanceWalkingRunning');
       let distMi = 0;
