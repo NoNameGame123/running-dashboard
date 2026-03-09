@@ -1,0 +1,34 @@
+name: Update Training Data
+
+on:
+  schedule:
+    - cron: '0 0 * * *'        # Runs every day at midnight UTC
+  workflow_dispatch:           # Lets you run it manually
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f scripts/requirements.txt ]; then pip install -r scripts/requirements.txt; fi
+
+      - name: Run your Python script
+        run: python scripts/update_training_data.py
+        # Add env: section here if your script needs API keys
+
+      - name: Auto-commit updated JSON
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update training data"
+          file_pattern: "public/training-data.json"   # ← CHANGE THIS if your JSON is elsewhere
