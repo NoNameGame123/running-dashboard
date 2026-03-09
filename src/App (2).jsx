@@ -220,209 +220,125 @@ function extractStrideLength(w) {
   return stat ? parseFloat(stat.average ?? stat.value) : null;
 }
 
-function createMileSplits(w) {
-  // New format: mile_splits from Strava with apple_health metrics fused in
-  if (Array.isArray(w.mile_splits) && w.mile_splits.length > 0) {
-    return w.mile_splits.map(ms => {
-      const ah  = ms.apple_health        || {};
-      const hr  = ah.HeartRate           || {};
-      const pwr = ah.Power               || {};
-      const gct = ah.GroundContactTime   || {};
-      const vo  = ah.VerticalOscillation || {};
-      const sl  = ah.StrideLength        || {};
-      const movingSec = ms.moving_sec ?? ms.elapsed_sec ?? 0;
-      return {
-        mile:         ms.mile,
-        distMiles:    ms.distance_miles ?? null,
-        distKm:       ms.distance_m ? ms.distance_m / 1000 : null,
-        movingTimeSec: movingSec,
-        elapsedSec:   ms.elapsed_sec ?? null,
-        // pace from moving time so pauses don't inflate it
-        paceSec:      (ms.distance_m && movingSec > 0)
-                        ? movingSec / (ms.distance_m / 1609.344)
-                        : null,
-        avgHR:    hr.avg  ?? null,
-        maxHR:    hr.max  ?? null,
-        minHR:    hr.min  ?? null,
-        avgPower: pwr.avg ?? null,
-        avgGCT:   gct.avg ?? null,
-        avgVO:    vo.avg  ?? null,
-        avgStride: sl.avg ?? null,
-        paceZone: ms.pace_zone ?? null,
-      };
-    });
-  }
-  // Legacy fallback: old lap-based splits from apple health only
-  if (Array.isArray(w.splits) && w.splits.length > 0) {
-    return w.splits.map((split, idx) => {
-      const metrics = split.metrics || {};
-      const hrData  = metrics.HKQuantityTypeIdentifierHeartRate || metrics.HeartRate || {};
-      return {
-        mile: idx + 1, distMiles: null,
-        distKm: metrics.HKQuantityTypeIdentifierDistanceWalkingRunning?.sum || 0,
-        movingTimeSec: (new Date(split.end) - new Date(split.start)) / 1000,
-        elapsedSec: null, paceSec: null,
-        avgHR: hrData.avg || null, maxHR: hrData.max || null, minHR: hrData.min || null,
-        avgPower: null, avgGCT: null, avgVO: null, avgStride: null, paceZone: null,
-      };
-    });
-  }
-  return [];
+function createSplitsFromHeartRateData(w, distKm) {
+  if (!w.splits || !Array.isArray(w.splits) || w.splits.length === 0) return [];
+  return w.splits.map((split, idx) => {
+    const metrics = split.metrics || {};
+    const hrData = metrics.HKQuantityTypeIdentifierHeartRate || {};
+    return {
+      split: idx + 1,
+      distKm: metrics.HKQuantityTypeIdentifierDistanceWalkingRunning?.sum || 0,
+      movingTimeSec: (new Date(split.end) - new Date(split.start)) / 1000,
+      avgHR: hrData.avg || null,
+      maxHR: hrData.max || null,
+      minHR: hrData.min || null,
+    };
+  });
 }
-// Keep old name as alias for any callers
-function createSplitsFromHeartRateData(w, distKm) { return createMileSplits(w); }
-
-/* ─── Activity type label map ────────────────────────────────────────────── */
-function sportLabel(actType) {
-  const MAP = {
-    HKWorkoutActivityTypeRunning:       "Run",
-    HKWorkoutActivityTypeCycling:       "Cycling",
-    HKWorkoutActivityTypeSwimming:      "Swimming",
-    HKWorkoutActivityTypeWalking:       "Walking",
-    HKWorkoutActivityTypeHiking:        "Hiking",
-    HKWorkoutActivityTypeStrengthTraining: "Strength",
-    HKWorkoutActivityTypeYoga:          "Yoga",
-    HKWorkoutActivityTypeCoreTraining:  "Core",
-    HKWorkoutActivityTypeFunctionalStrengthTraining: "Strength",
-    HKWorkoutActivityTypeCrossTraining: "Cross-Training",
-    HKWorkoutActivityTypeElliptical:    "Elliptical",
-    HKWorkoutActivityTypeRowing:        "Rowing",
-  };
-  return MAP[actType] ?? actType?.replace("HKWorkoutActivityType","") ?? "Workout";
-}
-
-// Safari-safe date parse for Apple Health format "2026-01-02 08:19:19 -0400"
-function parseAppleDate(ds) {
-  if (!ds) return new Date();
-  let s = ds.trim().replace(' ', 'T').replace(/ ([+-]\d{4})$/, '$1');
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? new Date() : d;
-}
-
-const RUNNING_TYPES_SET = new Set([
-  "HKWorkoutActivityTypeRunning", "running", "Running", "RUNNING",
-]);
 
 function transformAppleHealthData(json, debugCallback) {
   if (!json?.workouts?.length) return [];
-
-  // Log activity type distribution for debugging
+  const workouts = [];
+  
+  // Log all unique activity types found — critical for debugging filter mismatches
   const typeCounts = {};
   json.workouts.forEach(w => {
-    const t = w.activity_type ?? "(missing)";
+    const t = w.activity_type ?? w.workoutActivityType ?? w.activityType ?? "(missing)";
     typeCounts[t] = (typeCounts[t] || 0) + 1;
   });
   if (debugCallback) debugCallback(`Activity types in JSON: ${JSON.stringify(typeCounts)}`, "info");
 
-  const runs = [], crossTraining = [];
+  const RUNNING_TYPES = new Set([
+    'HKWorkoutActivityTypeRunning',
+    'running',
+    'Running',
+    'RUNNING',
+  ]);
 
   json.workouts.forEach(w => {
-    const actType = w.activity_type ?? "";
-    const isRun   = RUNNING_TYPES_SET.has(actType);
+    // Check all plausible field names for activity type
+    const actType = w.activity_type ?? w.workoutActivityType ?? w.activityType ?? "";
+    if (!RUNNING_TYPES.has(actType)) return;
     try {
-      // ── Robust Safari-safe date parse ─────────────────────────────────────
-      const startDate   = parseAppleDate(w.start_date);
-      const dateStr     = startDate.toISOString().slice(0, 10);
+      // ── ROBUST DATE PARSING (Safari-safe) ─────────────────────────────────
+      let startDate;
+      if (w.start_date) {
+        let ds = w.start_date.trim().replace(' ', 'T');           // "2026-01-02 18:19:19 -0400" → "2026-01-02T18:19:19-0400"
+        ds = ds.replace(/ ([+-]\d{4})$/, '$1');                   // clean any leftover space
+        startDate = new Date(ds);
+
+        if (isNaN(startDate.getTime())) {
+          console.warn("Date parse failed on mobile:", w.start_date);
+          startDate = new Date(); // fallback
+        }
+      } else {
+        startDate = new Date();
+      }
+      // ─────────────────────────────────────────────────────────────────────
+      const dateStr = startDate.toISOString().slice(0, 10);
+      const distStat = w.statistics?.find(s => s.type === 'HKQuantityTypeIdentifierDistanceWalkingRunning');
+      let distMi = 0;
+      if (distStat) distMi = parseFloat(distStat.sum ?? distStat.value);
+      const distKm = distMi * 1.60934;
       const durationMin = parseFloat(w.duration) || 0;
       const durationSec = durationMin * 60;
-      if (durationSec < 60) return;
-
-      // ── Non-runs: minimal context for AI only, never shown on dashboard ───
-      if (!isRun) {
-        crossTraining.push({
-          date:        dateStr,
-          type:        sportLabel(actType),
-          durationMin: Math.round(durationMin),
-          calories:    extractCalories(w) != null ? Math.round(extractCalories(w)) : null,
-          avgHR:       extractAvgHR(w)    != null ? +extractAvgHR(w).toFixed(1)    : null,
-        });
-        return;
-      }
-
-      // ── Runs ──────────────────────────────────────────────────────────────
-      const distStat = w.statistics?.find(s => s.type === 'HKQuantityTypeIdentifierDistanceWalkingRunning');
-      let distMi = distStat ? parseFloat(distStat.sum ?? distStat.value) : 0;
-      // Some HK versions populate total_distance directly
-      if (!distMi && w.total_distance) distMi = parseFloat(w.total_distance);
-      const distKm = distMi * 1.60934;
       if (distKm < 0.1 || durationSec < 60) return;
-
-      const mileSplits = createMileSplits(w);
-
-      // Prefer median moving pace from Strava mile splits over AH-calculated pace
-      // (AH uses total duration including pauses; Strava uses moving time)
-      let pace = extractPaceFromWorkout(w);
-      if (mileSplits.length >= 2) {
-        const fullMiles = mileSplits.filter(ms => ms.distMiles != null && ms.distMiles >= 0.85 && ms.paceSec);
-        if (fullMiles.length >= 2) {
-          const sorted = [...fullMiles].sort((a, b) => a.paceSec - b.paceSec);
-          const med = sorted[Math.floor(sorted.length / 2)];
-          if (med?.paceSec) pace = paceSecToLabel(Math.round(med.paceSec));
-        }
-      }
-
-      const avgHR             = extractAvgHR(w);
-      const maxHR             = extractMaxHR(w);
-      const avgCadence        = extractCadence(w);
-      const calories          = extractCalories(w);
-      const elevM             = extractElevation(w);
-      const runningPower      = extractRunningPower(w);
+      const pace = extractPaceFromWorkout(w);
+      const avgHR = extractAvgHR(w);
+      const maxHR = extractMaxHR(w);
+      const avgCadence = extractCadence(w);
+      const calories = extractCalories(w);
+      const elevM = extractElevation(w);
+      const runningPower = extractRunningPower(w);
       const groundContactTime = extractGroundContactTime(w);
-      const vertOsc           = extractVerticalOscillation(w);
-      const strideLen         = extractStrideLength(w);
-
+      const verticalOscillation = extractVerticalOscillation(w);
+      const strideLength = extractStrideLength(w);
+      const splits = createSplitsFromHeartRateData(w, distKm);
       const indoorMeta = w.metadata?.find(m => m.key === 'HKIndoorWorkout');
-      const isIndoor   = indoorMeta?.value === '1';
-      const type       = isIndoor ? "Indoor Run" : "Run";
-      const startHour  = startDate.getHours();
-      const timeOfDay  = startHour < 9  ? "morning"
-                       : startHour < 12 ? "late-morning"
-                       : startHour < 15 ? "midday"
-                       : startHour < 18 ? "afternoon"
-                       : "evening";
+      const isIndoor = indoorMeta ? indoorMeta.value === '1' : false;
+      const type = isIndoor ? "Indoor Run" : "Run";
+      const startHour = startDate.getHours();
+      const timeOfDay = startHour == null ? "unknown"
+        : startHour < 9 ? "morning" : startHour < 12 ? "late-morning"
+        : startHour < 15 ? "midday" : startHour < 18 ? "afternoon" : "evening";
+      const isoTimestamp = startDate.toISOString();
+      // Extract weather data
       const ew = w.enriched_weather;
-
-      runs.push({
-        id:           `run-${startDate.toISOString()}-${runs.length}`,
-        date:         dateStr,
-        displayTime:  `${dateStr.slice(5)} ${String(startHour).padStart(2,"0")}:${String(startDate.getMinutes()).padStart(2,"0")}`,
-        title:        w.strava_name || sportLabel(actType),
+      const temperature = ew?.temperature ?? null;
+      const humidity = ew?.humidity ?? null;
+      workouts.push({
+        id: `run-${isoTimestamp}-${workouts.length}`,
+        date: dateStr,
+        displayTime: `${dateStr.slice(5)} ${String(startDate.getHours()).padStart(2,'0')}:${String(startDate.getMinutes()).padStart(2,'0')}`,
+        title: w.activity_type || "Run",
         type,
-        dist:         distKm,
+        dist: distKm,
         pace,
-        paceSec:      paceToSec(pace),
-        elev:         elevM,
-        movingTimeSec:  durationSec,
+        elev: elevM,
+        movingTimeSec: durationSec,
         elapsedTimeSec: durationSec,
-        avgHR:        avgHR  != null ? +avgHR.toFixed(1)   : null,
-        maxHR:        maxHR  != null ? +maxHR.toFixed(1)   : null,
-        avgCadence:   avgCadence != null ? +avgCadence.toFixed(1) : null,
-        calories:     calories != null ? Math.round(calories) : null,
-        avgPower:     runningPower != null ? Math.round(runningPower) : null,
-        avgGroundContactTime:   groundContactTime != null ? +groundContactTime.toFixed(1)  : null,
-        avgVerticalOscillation: vertOsc != null           ? +vertOsc.toFixed(2)            : null,
-        avgStrideLength:        strideLen != null          ? +strideLen.toFixed(2)          : null,
-        avgSpeedKmh:  durationSec > 0 ? distKm / (durationSec / 3600) : 0,
-        indoor:       isIndoor,
+        avgHR: avgHR != null ? +avgHR.toFixed(1) : null,
+        maxHR: maxHR != null ? +maxHR.toFixed(1) : null,
+        avgCadence: avgCadence != null ? +avgCadence.toFixed(1) : null,
+        calories: calories != null ? Math.round(calories) : null,
+        avgPower: runningPower != null ? Math.round(runningPower) : null,
+        avgGroundContactTime: groundContactTime != null ? +groundContactTime.toFixed(1) : null,
+        avgVerticalOscillation: verticalOscillation != null ? +verticalOscillation.toFixed(2) : null,
+        avgStrideLength: strideLength != null ? +strideLength.toFixed(2) : null,
+        avgSpeedKmh: durationSec > 0 ? distKm / (durationSec / 3600) : 0,
+        indoor: isIndoor,
         startHour,
         timeOfDay,
-        splits:       mileSplits,
-        temperature:  ew?.temperature ?? null,
-        humidity:     ew?.humidity    ?? null,
-        stravaId:     w.strava_id   ?? null,
-        stravaName:   w.strava_name ?? null,
+        splits,
+        paceSec: paceToSec(pace),
+        temperature,
+        humidity,
       });
     } catch (err) {
       console.warn("Error processing workout:", err, w);
     }
   });
-
-  if (debugCallback) {
-    debugCallback(`Runs: ${runs.length} | Cross-training: ${crossTraining.length}`, runs.length > 0 ? "ok" : "warn");
-  }
-  // Stash cross-training on the function object so the component can read it
-  transformAppleHealthData._crossTraining = crossTraining.sort((a, b) => a.date.localeCompare(b.date));
-  return runs.sort((a, b) => a.date.localeCompare(b.date));
+  return workouts.sort((a,b) => a.date.localeCompare(b.date));
 }
 
 function extractVO2MaxData(json) {
@@ -539,7 +455,7 @@ function summarizeTrainingData(runs, computed) {
     avgHR, thisWeekMi, thisWeekRuns, avgPaceFmt30, totalMi,
     trainingMonotony, runs: allRuns, weekly, longRunTrend,
     hrTimeReg, firstRunDate, criticalPaceData, longRuns90Min,
-    acwrHistory, crossTraining,
+    acwrHistory,
   } = computed;
 
   const today = new Date();
@@ -613,20 +529,6 @@ function summarizeTrainingData(runs, computed) {
   const thisWeekHRRuns = thisWeekRuns.filter(r => r.avgHR);
   const thisWeekAvgHR = thisWeekHRRuns.length ? Math.round(thisWeekHRRuns.reduce((s,r) => s + r.avgHR, 0) / thisWeekHRRuns.length) : null;
 
-  // Summarize cross-training from last 30 days for AI coach context
-  const recentCrossTraining = (() => {
-    if (!Array.isArray(crossTraining) || !crossTraining.length) return {};
-    const cutoff = new Date(today); cutoff.setDate(today.getDate() - 30);
-    return crossTraining
-      .filter(a => new Date(a.date + "T12:00:00") >= cutoff)
-      .reduce((acc, a) => {
-        if (!acc[a.type]) acc[a.type] = { sessions: 0, totalMin: 0 };
-        acc[a.type].sessions++;
-        acc[a.type].totalMin += a.durationMin || 0;
-        return acc;
-      }, {});
-  })();
-
   return {
     today: todayStr,
     weeksToRace,
@@ -662,7 +564,6 @@ function summarizeTrainingData(runs, computed) {
       marathonPrediction: criticalPaceData?.marathonPred ?? null,
     },
     recentRunsDetail,
-    recentCrossTraining,
     athleteContext: {
       experience: "newer runner, aerobic base still developing",
       easyRunHRBaseline: "140s bpm is normal and expected for this athlete — do NOT flag as too hard",
@@ -723,7 +624,7 @@ function CoachReport({ summary }) {
 
     const systemPrompt = `You are coaching in the direct, evidence-based style of Steve Magness. Your philosophy:\n\nMAGNESS PRINCIPLES — apply these to every piece of advice:\n1. Stress + Rest = Adaptation. Most recreational athletes chronically under-recover. The adaptation happens AFTER the run, not during it. Easy days are not wasted days — they are when the previous hard work gets consolidated.\n2. Polarize ruthlessly. 80% of volume at genuinely easy effort, 20% hard. The grey zone (moderate effort, HR 150-165) is the enemy — too hard to recover from, too easy to drive adaptation. It's where most recreational runners live and why they plateau.\n3. Build aerobic infrastructure first. Mitochondrial density, capillary development, fat oxidation, cardiac stroke volume — these are built at low intensity. You cannot shortcut this with tempo runs. The aerobic base is the ceiling for everything else.\n4. Progressive overload with planned recovery. Volume builds in 3-week blocks, then a down week. The 10% rule is too conservative for some athletes and too aggressive for others — what matters is the ACWR ratio (acute vs chronic load). Above 1.3 is yellow; above 1.5 is red.\n5. Specificity late, base early. Marathon-specific work (tempo, MP long runs) only belongs in the final 10-12 weeks. Before that, you're building the engine, not tuning it.\n6. Individual response over generic plans. A plan describes an average athlete. Data describes this athlete. When the two conflict, trust the data.\n7. Long runs are the cornerstone. For marathon, the long run builds mitochondria, teaches fat oxidation, and trains the musculoskeletal system for time-on-feet. It should be easy (HR <150) — not a race. Running long runs too hard is one of the most common and damaging mistakes in marathon prep.\n\nATHLETE CONTEXT — non-negotiable, do not contradict:\n- Newer runner. Aerobic base is still developing. This is not a problem — it is the current reality to work with.\n- Easy runs naturally sit in the 140s bpm. This is their aerobic baseline. Do NOT flag 140s HR as too high. It will drift lower as fitness improves over the season.\n- HR zones for THIS athlete: easy = under 150 bpm, moderate = 150-165 bpm, hard = over 165 bpm.\n- Do not use generic HR zone language (like "Zone 2" or "under 140"). Use this athlete's specific zones only.\n- The season goal is to build the aerobic base so that, by race week, easy runs feel genuinely easy at a pace that would have felt hard in January.\n\nTODAY: ${summary.today}\nTRAINING PHASE: ${summary.phase.toUpperCase()} — ${phaseContext}\nRACE: ${summary.raceDate} | ${summary.weeksToRace} weeks to go\n\nOUTPUT FORMAT — respond ONLY with this exact JSON structure, no markdown, no preamble:\n{\n  "concerns": [\n    { "level": "HIGH|MEDIUM", "title": "concise title", "body": "2-4 sentences. State the pattern, explain the physiological mechanism (why this matters), and what to do about it. Be specific — cite actual numbers from the data.", "stillApplicable": true }\n  ],\n  "guidance": [\n    { "n": "01", "title": "action-oriented title", "body": "3-5 sentences. Ground every recommendation in physiology. Name the mechanism. Reference the athlete's actual numbers. Be direct but not dogmatic — Magness respects intelligent adults." }\n  ],\n  "thisWeekAction": "One concrete, specific thing to try this week — a real workout prescription with actual numbers (distance, target HR, pace). Must directly reference the athlete's data above. 2-3 sentences, immediately actionable.",\n  \"generatedAt\": \"${new Date().toISOString()}\"\n}\n\nRules: order concerns HIGH before MEDIUM. Exactly 3 guidance items. thisWeekAction must be a specific prescription for this week — not a principle, a real actionable change.`;
 
-    const userPrompt = `Here is the athlete's current training data. Analyze it and generate a coach's report grounded in Steve Magness's training philosophy. Reference specific numbers — don't give generic advice.\n\n${JSON.stringify(summary, null, 2)}\n\nCross-training this month (for context only — this is a running dashboard): ${JSON.stringify(summary.recentCrossTraining || {})}\n\nKey reminders before you respond:\n- Today is ${summary.today}. Use this for any date references — do not invent or approximate dates.\n- HR in the 140s is fine for this athlete. Do not flag it.\n- Use athlete-specific zones throughout: easy <150, moderate 150-165, hard 165+.\n- Every concern and guidance item must reference actual numbers from the data above.\n- The generatedAt field must be today's date in ISO format.`;
+    const userPrompt = `Here is the athlete's current training data. Analyze it and generate a coach's report grounded in Steve Magness's training philosophy. Reference specific numbers — don't give generic advice.\n\n${JSON.stringify(summary, null, 2)}\n\nKey reminders before you respond:\n- Today is ${summary.today}. Use this for any date references — do not invent or approximate dates.\n- HR in the 140s is fine for this athlete. Do not flag it.\n- Use athlete-specific zones throughout: easy <150, moderate 150-165, hard 165+.\n- Every concern and guidance item must reference actual numbers from the data above.\n- The generatedAt field must be today's date in ISO format.`;
 
     const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY;
 
@@ -944,7 +845,6 @@ export default function Dashboard() {
 
   const [tab, setTab]               = useState("overview");
   const [raw, setRaw]               = useState([]);
-  const [crossTraining, setCrossTraining] = useState([]);
   const [loading, setLoading]       = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError]           = useState(null);
@@ -954,6 +854,7 @@ export default function Dashboard() {
   const [patView, setPatView] = useState('dow');
   const [econView, setEconView] = useState('rolling');
   const [longRunView, setLongRunView] = useState('chart');
+  const [scatterMode, setScatterMode] = useState('runs'); // 'runs' | 'miles'
   const [selectedRun, setSelectedRun] = useState(null);
   const [runSort, setRunSort]         = useState({ key:"date", dir:"desc" });
   const [runFilter, setRunFilter]     = useState("");
@@ -987,7 +888,6 @@ export default function Dashboard() {
         addDebug(`Transformed runs: ${transformed.length}`, transformed.length > 0 ? "ok" : "warn");
         if (transformed.length === 0 && workoutCount > 0) addDebug("⚠️ Workouts present but none transformed — activity type filter may be dropping them all", "warn");
         setRaw(transformed);
-        setCrossTraining(transformAppleHealthData._crossTraining || []);
         setVo2MaxData(extractVO2MaxData(json));
         setLastUpdated(new Date().toISOString());
       })
@@ -1243,6 +1143,117 @@ export default function Dashboard() {
     : longRunsWithEffort.map(r => ({ ...r, trend: r.miles })),
   [longRunsWithEffort, longRunTrend]);
 
+  // ── Mile-split analytics ───────────────────────────────────────────────────
+
+  // Per-long-run split stats: pace fade, HR drift, power fade, "held it together" score
+  const longRunSplitStats = useMemo(() => {
+    return runsWithDuration
+      .filter(r => kmToMi(r.dist) >= longRunMiles || r.durationMin >= 90)
+      .filter(r => r.splits && r.splits.length >= 3)
+      .map(r => {
+        const splits = r.splits.filter(s => s.paceSec || s.avgHR);
+        const n = splits.length;
+        const half = Math.floor(n / 2);
+        const avg = (arr, key) => { const v = arr.filter(s => s[key]); return v.length ? v.reduce((a,b)=>a+b[key],0)/v.length : null; };
+        const p1 = avg(splits.slice(0, half), 'paceSec');
+        const p2 = avg(splits.slice(half), 'paceSec');
+        const h1 = avg(splits.slice(0, half), 'avgHR');
+        const h2 = avg(splits.slice(half), 'avgHR');
+        const pw1 = avg(splits.slice(0, half), 'avgPower');
+        const pw2 = avg(splits.slice(half), 'avgPower');
+        const paceFadeSec  = p1 && p2 ? +(p2 - p1).toFixed(1) : null;  // positive = slowed
+        const hrDrift      = h1 && h2 ? +(h2 - h1).toFixed(1) : null;  // positive = HR rose
+        const powerFade    = pw1 && pw2 ? +(pw2 - pw1).toFixed(1) : null; // negative = power dropped
+        // Composite "held it together" score 0–100
+        const held = (() => {
+          if (paceFadeSec == null && hrDrift == null) return null;
+          let score = 100;
+          if (paceFadeSec != null) {
+            if (paceFadeSec > 0) score -= Math.min(45, paceFadeSec * 2.2); // each s/mi costs 2.2 pts
+            else score = Math.min(100, score + 5); // negative split bonus
+          }
+          if (hrDrift != null && hrDrift > 8) score -= Math.min(25, (hrDrift - 8) * 1.5);
+          if (powerFade != null && powerFade < -15) score -= Math.min(15, Math.abs(powerFade + 15) * 0.4);
+          return Math.max(0, Math.min(100, Math.round(score)));
+        })();
+        // Per-mile chart data
+        const mileChart = splits.map(s => ({
+          mile: s.mile ?? (splits.indexOf(s) + 1),
+          paceSec:  s.paceSec  ? +s.paceSec.toFixed(0)  : null,
+          avgHR:    s.avgHR    ? +s.avgHR.toFixed(0)    : null,
+          avgPower: s.avgPower ? +s.avgPower.toFixed(0) : null,
+          avgGCT:   s.avgGCT   ? +s.avgGCT.toFixed(0)   : null,
+        }));
+        return {
+          date: r.date,
+          miles: +kmToMi(r.dist).toFixed(2),
+          paceFadeSec,
+          hrDrift,
+          powerFade,
+          held,
+          mileChart,
+          numSplits: splits.length,
+        };
+      })
+      .sort((a,b) => a.date.localeCompare(b.date));
+  }, [runsWithDuration]);
+
+  // Best single-mile pace from Strava splits (more accurate than run-level pace)
+  const bestMileSplitPace = useMemo(() => {
+    let best = null;
+    runs.forEach(r => {
+      if (!r.splits?.length) return;
+      r.splits.forEach(s => {
+        if (s.paceSec && s.distMiles >= 0.85 && s.distMiles <= 1.15) {
+          if (!best || s.paceSec < best.paceSec)
+            best = { paceSec: s.paceSec, date: r.date };
+        }
+      });
+    });
+    return best;
+  }, [runs]);
+
+  // Mile-split scatter: one point per qualified mile across all runs (huge density boost)
+  const mileSplitScatter = useMemo(() => {
+    const pts = [];
+    withHR.forEach(r => {
+      if (!r.splits?.length) return;
+      r.splits.forEach(s => {
+        if (s.paceSec && s.avgHR && s.distMiles >= 0.85) {
+          pts.push({
+            x: +s.paceSec.toFixed(0),
+            y: +s.avgHR.toFixed(0),
+            date: r.date,
+            pace: paceSecToLabel(Math.round(s.paceSec)),
+            dist: +kmToMi(r.dist).toFixed(1),
+            mile: s.mile,
+          });
+        }
+      });
+    });
+    return pts;
+  }, [withHR]);
+
+  // HR drift profile across all long runs: avg HR by 5 quintile buckets
+  const longRunHRProfile = useMemo(() => {
+    const runsWithHRSplits = longRunSplitStats.filter(r => r.mileChart.some(m => m.avgHR));
+    if (runsWithHRSplits.length < 2) return null;
+    const quintiles = [[], [], [], [], []];
+    runsWithHRSplits.forEach(r => {
+      const hrmiles = r.mileChart.filter(m => m.avgHR);
+      const n = hrmiles.length;
+      hrmiles.forEach((m, i) => {
+        const q = Math.min(4, Math.floor(i / n * 5));
+        quintiles[q].push(m.avgHR);
+      });
+    });
+    const labels = ['Start','Early','Mid','Late','Finish'];
+    return quintiles.map((arr, i) => ({
+      label: labels[i],
+      avgHR: arr.length ? +(arr.reduce((a,b)=>a+b,0)/arr.length).toFixed(1) : null,
+    })).filter(q => q.avgHR != null);
+  }, [longRunSplitStats]);
+
   const dailyLoad = useMemo(() => {
     const byDate = {};
     runsWithDuration.forEach(r => {
@@ -1375,7 +1386,15 @@ export default function Dashboard() {
     const sp = arr => [...arr].sort((a,b)=>a.paceSec-b.paceSec);
     const best10K   = sp(recent.filter(r=>r.miles>=5.5&&r.miles<=7))[0];
     const bestTempo = sp(recent.filter(r=>r.miles>=3&&r.miles<=5))[0];
-    const bestMile  = sp(recent.filter(r=>r.miles>=0.9&&r.miles<=1.4))[0];
+    const bestMileRun  = sp(recent.filter(r=>r.miles>=0.9&&r.miles<=1.4))[0];
+    // Also check best single-mile from Strava splits — often faster & more accurate
+    const bestMile = (() => {
+      if (bestMileRun && bestMileSplitPace && bestMileSplitPace.paceSec < bestMileRun.paceSec)
+        return { paceSec: bestMileSplitPace.paceSec, date: bestMileSplitPace.date, fromSplit: true };
+      if (!bestMileRun && bestMileSplitPace)
+        return { paceSec: bestMileSplitPace.paceSec, date: bestMileSplitPace.date, fromSplit: true };
+      return bestMileRun;
+    })();
     const bestHM    = sp(recent.filter(r=>r.miles>=11&&r.miles<=14))[0];
     const bestLong  = sp(recent.filter(r=>r.miles>=14))[0];
     // Riegel: T2 = T1*(D2/D1)^1.06
@@ -1411,7 +1430,7 @@ export default function Dashboard() {
       predSource,
       easyZoneLow:easyLo, easyZoneHigh:easyHi, tempoZone:tempo, mpZone:mp,
     };
-  }, [runs]);
+  }, [runs, bestMileSplitPace]);
 
   const longRuns90Min = useMemo(() => runsWithDuration
     .filter(r => r.durationMin >= 90 && r.avgHR != null)
@@ -1430,12 +1449,12 @@ export default function Dashboard() {
       avgHR: avgHRAll30, thisWeekMi, thisWeekRuns,
       avgPaceFmt30, totalMi, trainingMonotony, runs,
       weekly, longRunTrend, hrTimeReg, firstRunDate,
-      criticalPaceData, longRuns90Min, acwrHistory, crossTraining,
+      criticalPaceData, longRuns90Min, acwrHistory,
     });
   }, [runs, acwr, weeklyPolarized, weeksToRace, effReg, longRuns,
      avgHRAll30, thisWeekMi, thisWeekRuns, avgPaceFmt30, totalMi,
      trainingMonotony, weekly, longRunTrend, hrTimeReg, firstRunDate,
-     criticalPaceData, longRuns90Min, acwrHistory, crossTraining]);
+     criticalPaceData, longRuns90Min, acwrHistory]);
 
   const cumulativeLoadChart = useMemo(() => {
     return weeklyLoad.map((w, i) => {
@@ -1665,7 +1684,7 @@ export default function Dashboard() {
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, borderBottom:"1px solid #30363d", paddingBottom:8 }}>
               <p style={{ color:"#e6edf3", fontSize:13, fontWeight:700, margin:0 }}>Fetch Debug Log</p>
               <div style={{ display:"flex", gap:8 }}>
-                <span style={{ color:"#8b949e", fontSize:11 }}>runs: {raw.length} | cross-training: {crossTraining.length}</span>
+                <span style={{ color:"#8b949e", fontSize:11 }}>runs loaded: {raw.length}</span>
                 <button onClick={() => { setDebugLog([]); fetchData(true); }}
                   style={{ background:"#21262d", color:"#58a6ff", border:"1px solid #30363d", borderRadius:4, padding:"2px 8px", fontSize:11, cursor:"pointer", fontFamily:F }}>
                   Retry
@@ -2085,36 +2104,74 @@ export default function Dashboard() {
                   </div>
 
                   <div>
-                    <div style={{ marginBottom:12 }}>
-                      <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:"0 0 3px" }}>HR vs Pace Scatter</p>
-                      <p style={{ color:C.midGray, fontSize:13, margin:"0 0 8px", lineHeight:1.5 }}>Each dot = one run. A downward shift over time signals aerobic gains.</p>
-                      {regression && (
-                        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-                          <span style={{ fontSize:13, color:C.midGray }}>Correlation R²</span>
-                          <span style={{ fontSize:14, fontWeight:700, color:regression.r2>0.6?C.green:regression.r2>0.3?C.amber:C.midGray }}>{(regression.r2*100).toFixed(0)}%</span>
-                          <span style={{ fontSize:13, color:C.midGray }}>· {regression.r2>0.6?"Strong":regression.r2>0.3?"Moderate":"Weak"}</span>
+                    <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:12, flexWrap:"wrap", gap:10 }}>
+                      <div>
+                        <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:"0 0 3px" }}>HR vs Pace Scatter</p>
+                        <p style={{ color:C.midGray, fontSize:13, margin:0, lineHeight:1.5 }}>
+                          {scatterMode === 'runs'
+                            ? "Each dot = one run avg. A downward shift signals aerobic gains."
+                            : `Each dot = one mile split (${mileSplitScatter.length} pts). Higher density reveals your true HR–pace curve.`}
+                        </p>
+                      </div>
+                      {mileSplitScatter.length > 0 && (
+                        <div style={{ display:"flex", borderRadius:6, overflow:"hidden", border:`1px solid ${C.border}`, flexShrink:0 }}>
+                          {[{id:'runs',label:'Per Run'},{id:'miles',label:`Mile Splits (${mileSplitScatter.length})`}].map(opt => (
+                            <button key={opt.id} onClick={()=>setScatterMode(opt.id)} style={{
+                              padding:"5px 12px", fontSize:12, fontWeight:600, fontFamily:F, cursor:"pointer", border:"none",
+                              background: scatterMode===opt.id ? C.navy : C.white,
+                              color: scatterMode===opt.id ? C.white : C.midGray,
+                            }}>{opt.label}</button>
+                          ))}
                         </div>
                       )}
                     </div>
-                    <ResponsiveContainer width="100%" height={210}>
-                      <ScatterChart margin={{ top:8, right:8, bottom:22, left:0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={C.light} />
-                        <XAxis type="number" dataKey="x" name="Pace" domain={["auto","auto"]}
-                          tick={{ fill:C.midGray, fontSize:11 }}
-                          label={{ value:"pace (min/mi)", position:"insideBottom", offset:-8, fill:C.midGray, fontSize:11 }}
-                          tickFormatter={v=>`${Math.floor(v/60)}:${String(v%60).padStart(2,"0")}`} />
-                        <YAxis type="number" dataKey="y" name="Avg HR" domain={["auto","auto"]}
-                          tick={{ fill:C.midGray, fontSize:11 }} width={30} />
-                        <Tooltip content={<ScatterTip />} />
-                        <Scatter data={scatter} fill={C.navy} opacity={0.7} r={4} />
-                        {regression && (() => {
-                          const xs=scatter.map(d=>d.x);
-                          const xMin=Math.min(...xs), xMax=Math.max(...xs);
-                          return <Scatter data={[{x:xMin,y:regression.slope*xMin+regression.intercept},{x:xMax,y:regression.slope*xMax+regression.intercept}]}
-                            fill="none" line={{ stroke:C.red, strokeWidth:1.5, strokeDasharray:"5 3" }} shape={()=>null} legendType="none" />;
-                        })()}
-                      </ScatterChart>
-                    </ResponsiveContainer>
+                    {(() => {
+                      const activeData = scatterMode === 'miles' && mileSplitScatter.length > 0 ? mileSplitScatter : scatter;
+                      const activeReg  = linReg(activeData);
+                      const MileTip = ({ active, payload }) => {
+                        if (!active||!payload?.length) return null;
+                        const d = payload[0].payload;
+                        return (
+                          <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:8, padding:"10px 14px", fontFamily:F, fontSize:13 }}>
+                            <p style={{ color:C.navy, fontWeight:700, margin:"0 0 4px" }}>{d.date}{d.mile ? ` · Mile ${d.mile}` : ''}</p>
+                            <Row label="Pace" value={`${d.pace} /mi`} bold color={C.red} />
+                            <Row label="HR" value={`${d.y} bpm`} bold color={C.navy} />
+                            <Row label="Run dist" value={`${d.dist} mi`} />
+                          </div>
+                        );
+                      };
+                      return (
+                        <>
+                          {activeReg && (
+                            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
+                              <span style={{ fontSize:13, color:C.midGray }}>R²</span>
+                              <span style={{ fontSize:14, fontWeight:700, color:activeReg.r2>0.6?C.green:activeReg.r2>0.3?C.amber:C.midGray }}>{(activeReg.r2*100).toFixed(0)}%</span>
+                              <span style={{ fontSize:13, color:C.midGray }}>· {activeReg.r2>0.6?"Strong":activeReg.r2>0.3?"Moderate":"Weak"} correlation</span>
+                            </div>
+                          )}
+                          <ResponsiveContainer width="100%" height={220}>
+                            <ScatterChart margin={{ top:8, right:8, bottom:22, left:0 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke={C.light} />
+                              <XAxis type="number" dataKey="x" name="Pace" domain={["auto","auto"]}
+                                tick={{ fill:C.midGray, fontSize:11 }}
+                                label={{ value:"pace (min/mi)", position:"insideBottom", offset:-8, fill:C.midGray, fontSize:11 }}
+                                tickFormatter={v=>`${Math.floor(v/60)}:${String(v%60).padStart(2,"0")}`} />
+                              <YAxis type="number" dataKey="y" name="Avg HR" domain={["auto","auto"]}
+                                tick={{ fill:C.midGray, fontSize:11 }} width={30} />
+                              <Tooltip content={scatterMode==='miles' ? <MileTip /> : <ScatterTip />} />
+                              <Scatter data={activeData} fill={scatterMode==='miles'?C.bofaBlue:C.navy}
+                                opacity={scatterMode==='miles'?0.45:0.75} r={scatterMode==='miles'?3:4} />
+                              {activeReg && (() => {
+                                const xs = activeData.map(d=>d.x);
+                                const xMin = Math.min(...xs), xMax = Math.max(...xs);
+                                return <Scatter data={[{x:xMin,y:activeReg.slope*xMin+activeReg.intercept},{x:xMax,y:activeReg.slope*xMax+activeReg.intercept}]}
+                                  fill="none" line={{ stroke:C.red, strokeWidth:1.5, strokeDasharray:"5 3" }} shape={()=>null} legendType="none" />;
+                              })()}
+                            </ScatterChart>
+                          </ResponsiveContainer>
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
@@ -2398,12 +2455,22 @@ export default function Dashboard() {
                     : null;
                   return (
                     <div style={{ display:"grid", gridTemplateColumns: isMob ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:14, marginBottom:24 }}>
-                      {[
-                        { label:"Total Long Runs", value:longRuns.length, unit:"", sub:"≥8 mi or ≥90 min", color:C.navy, accent:C.navy },
-                        { label:"Longest Run", value:longest.miles.toFixed(1), unit:" mi", sub:fmtDate(longest.date), color:C.red, accent:C.red },
-                        { label:"Last Long Run", value:last.miles.toFixed(1), unit:" mi", sub:`${fmtDate(last.date)} · ${last.paceLabel}/mi`, color:C.bofaBlue, accent:C.bofaBlue },
-                        { label:"Avg HR on Longs", value:avgLongHR??"—", unit:" bpm", sub:avgLongHR==null?"no data":avgLongHR<150?"✓ Easy aerobic":avgLongHR<165?"Moderate effort":"Running hard", color:avgLongHR>165?C.red:avgLongHR>150?C.amber:C.green, accent:avgLongHR>165?C.red:avgLongHR>150?C.amber:C.green },
-                      ].map(s=>(
+                      {(() => {
+                        const runsWithFade = longRunSplitStats.filter(r => r.paceFadeSec != null);
+                        const avgFade = runsWithFade.length
+                          ? +(runsWithFade.reduce((s,r)=>s+r.paceFadeSec,0)/runsWithFade.length).toFixed(0)
+                          : null;
+                        const fadeColor  = avgFade == null ? C.midGray : avgFade <= 0 ? C.green : avgFade <= 20 ? C.green : avgFade <= 40 ? C.amber : C.red;
+                        const fadeSub    = avgFade == null ? "no split data yet"
+                          : avgFade <= 0 ? "✓ Negative splits" : avgFade <= 20 ? "Good control" : avgFade <= 40 ? "Some fade" : "Significant fade";
+                        const fadeLabel  = avgFade == null ? "—" : avgFade <= 0 ? `${avgFade}s` : `+${avgFade}s`;
+                        return [
+                          { label:"Total Long Runs", value:longRuns.length, unit:"", sub:"≥8 mi or ≥90 min", color:C.navy, accent:C.navy },
+                          { label:"Longest Run", value:longest.miles.toFixed(1), unit:" mi", sub:fmtDate(longest.date), color:C.red, accent:C.red },
+                          { label:"Avg HR on Longs", value:avgLongHR??"—", unit:" bpm", sub:avgLongHR==null?"no data":avgLongHR<150?"✓ Easy aerobic":avgLongHR<165?"Moderate effort":"Running hard", color:avgLongHR>165?C.red:avgLongHR>150?C.amber:C.green, accent:avgLongHR>165?C.red:avgLongHR>150?C.amber:C.green },
+                          { label:"Avg Pace Fade", value:fadeLabel, unit:"", sub:fadeSub, color:fadeColor, accent:fadeColor },
+                        ];
+                      })().map(s=>(
                         <div key={s.label} style={{
                           background:C.white,
                           border:`1px solid ${s.accent}30`,
@@ -2440,13 +2507,17 @@ export default function Dashboard() {
                       <YAxis tick={{ fill:C.midGray, fontSize:12 }} unit=" mi" domain={[0,24]} axisLine={false} tickLine={false} />
                       <Tooltip content={({ active, payload }) => {
                         if (!active||!payload?.[0]) return null;
-                        const p=payload[0].payload;
+                        const p = payload[0].payload;
+                        const ss = longRunSplitStats.find(r => r.date === p.date);
                         return (
-                          <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:8, padding:"10px 14px", fontFamily:F, fontSize:13 }}>
+                          <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:8, padding:"10px 14px", fontFamily:F, fontSize:13, minWidth:180 }}>
                             <p style={{ color:C.navy, fontWeight:700, margin:"0 0 6px" }}>{p.date}</p>
                             <p style={{ color:p.isEasy?C.green:p.isGoalPace?C.red:C.navy, fontSize:17, fontWeight:800, margin:"0 0 3px" }}>{Number(p.miles).toFixed(1)} mi</p>
                             <Row label="Pace" value={`${p.paceLabel}/mi`} />
-                            {p.avgHR&&<Row label="Avg HR" value={`${Math.round(p.avgHR)} bpm`} />}
+                            {p.avgHR && <Row label="Avg HR" value={`${Math.round(p.avgHR)} bpm`} />}
+                            {ss?.paceFadeSec != null && <Row label="Pace fade" value={ss.paceFadeSec <= 0 ? `${ss.paceFadeSec}s ✓` : `+${ss.paceFadeSec}s/mi`} color={ss.paceFadeSec <= 0 ? C.green : ss.paceFadeSec <= 30 ? C.amber : C.red} />}
+                            {ss?.hrDrift != null && <Row label="HR drift" value={`+${ss.hrDrift} bpm`} color={ss.hrDrift <= 8 ? C.green : ss.hrDrift <= 15 ? C.amber : C.red} />}
+                            {ss?.held != null && <Row label="Held together" value={`${ss.held}/100`} color={ss.held >= 80 ? C.green : ss.held >= 60 ? C.amber : C.red} />}
                           </div>
                         );
                       }} />
@@ -2484,13 +2555,15 @@ export default function Dashboard() {
                     <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:F, fontSize:14 }}>
                       <thead>
                         <tr style={{ borderBottom:`2px solid ${C.border}` }}>
-                          {["Date","Miles","Time","Pace","Avg HR","Type"].map(h=>(
-                            <th key={h} style={{ textAlign:h==="Date"||h==="Type"?"left":"right", padding:"7px 10px", color:C.midGray, fontWeight:600, fontSize:12, letterSpacing:"0.06em", textTransform:"uppercase" }}>{h}</th>
+                          {["Date","Miles","Time","Pace","Avg HR","Pace Fade","Held"].map(h=>(
+                            <th key={h} style={{ textAlign:h==="Date"?"left":"right", padding:"7px 10px", color:C.midGray, fontWeight:600, fontSize:12, letterSpacing:"0.06em", textTransform:"uppercase" }}>{h}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {longRunsWithEffort.map((r,i)=>(
+                        {longRunsWithEffort.map((r,i)=>{
+                          const ss = longRunSplitStats.find(x => x.date === r.date);
+                          return (
                           <tr key={r.date+i} style={{ borderBottom:`1px solid ${C.light}`, background:i%2===0?C.white:C.offWhite }}>
                             <td style={{ padding:"8px 10px", fontWeight:500, fontSize:13 }}>{fmtDate(r.date)}</td>
                             <td style={{ textAlign:"right", padding:"8px 10px", fontSize:14, fontWeight:700, color:r.miles>=20?C.red:r.miles>=15?C.navy:C.darkGray }}>{r.miles.toFixed(1)}</td>
@@ -2500,20 +2573,142 @@ export default function Dashboard() {
                               color:r.avgHR?r.avgHR<150?C.green:r.avgHR<165?C.amber:C.red:C.midGray }}>
                               {r.avgHR ? <>{Math.round(r.avgHR)} <span style={{ fontWeight:400, color:C.midGray }}>bpm</span></> : "—"}
                             </td>
-                            <td style={{ padding:"8px 10px", fontSize:12 }}>
-                              <span style={{ fontSize:11, fontWeight:600, padding:"2px 7px", borderRadius:3,
-                                color:r.isEasy?C.green:r.isGoalPace?C.red:C.midGray,
-                                background:r.isEasy?C.green+"15":r.isGoalPace?C.red+"15":C.light }}>
-                                {r.isEasy?"Easy aerobic":r.isGoalPace?"Goal pace":"Normal"}
-                              </span>
+                            <td style={{ textAlign:"right", padding:"8px 10px", fontSize:13 }}>
+                              {ss?.paceFadeSec != null
+                                ? <span style={{ fontWeight:700, color:ss.paceFadeSec<=0?C.green:ss.paceFadeSec<=20?C.green:ss.paceFadeSec<=40?C.amber:C.red }}>
+                                    {ss.paceFadeSec<=0?ss.paceFadeSec+"s":"+"+ss.paceFadeSec+"s"}/mi
+                                  </span>
+                                : <span style={{ color:C.midGray }}>—</span>}
+                            </td>
+                            <td style={{ textAlign:"right", padding:"8px 10px" }}>
+                              {ss?.held != null
+                                ? <span style={{ fontSize:12, fontWeight:700, padding:"2px 8px", borderRadius:10,
+                                    color:ss.held>=80?C.green:ss.held>=60?C.amber:C.red,
+                                    background:ss.held>=80?C.green+"18":ss.held>=60?C.amber+"18":C.red+"18" }}>
+                                    {ss.held}
+                                  </span>
+                                : <span style={{ color:C.midGray, fontSize:13 }}>—</span>}
                             </td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
                   )}
                 </div>
+
+                {/* ── Long run split analysis: per-run fade + cross-run HR drift ── */}
+                {longRunSplitStats.length > 0 && (() => {
+                  const hasFade = longRunSplitStats.some(r => r.paceFadeSec != null);
+                  return (
+                    <div style={{ borderTop:`1px solid ${C.light}`, paddingTop:20, marginTop:20 }}>
+                      <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:"0 0 4px" }}>Long Run Execution Analysis</p>
+                      <p style={{ color:C.midGray, fontSize:13, margin:"0 0 16px" }}>
+                        Pace fade = 2nd-half avg pace minus 1st-half avg pace per mile. Positive = slowed down. "Held" = composite execution score (pace, HR, power).
+                      </p>
+
+                      {/* Per-run fade bars */}
+                      {hasFade && (
+                        <div style={{ display:"grid", gridTemplateColumns: isMob ? "1fr" : "repeat(2,1fr)", gap:12, marginBottom:20 }}>
+                          {longRunSplitStats.filter(r => r.paceFadeSec != null).map(r => {
+                            const fc = r.paceFadeSec <= 0 ? C.green : r.paceFadeSec <= 20 ? C.green : r.paceFadeSec <= 40 ? C.amber : C.red;
+                            const barW = Math.min(100, Math.abs(r.paceFadeSec) * 2);
+                            return (
+                              <div key={r.date} style={{ background:C.offWhite, borderRadius:8, padding:"12px 14px", border:`1px solid ${fc}30` }}>
+                                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8 }}>
+                                  <span style={{ fontSize:13, fontWeight:700, color:C.darkGray }}>{fmtDate(r.date)}</span>
+                                  <span style={{ fontSize:12, color:C.midGray }}>{r.miles.toFixed(1)} mi · {r.numSplits} splits</span>
+                                </div>
+                                <div style={{ display:"flex", gap:16, flexWrap:"wrap", marginBottom:8 }}>
+                                  {r.paceFadeSec != null && (
+                                    <div>
+                                      <span style={{ fontSize:10, color:C.midGray, textTransform:"uppercase", letterSpacing:"0.08em" }}>Pace fade</span>
+                                      <p style={{ color:fc, fontSize:20, fontWeight:900, margin:"1px 0 0", lineHeight:1 }}>
+                                        {r.paceFadeSec <= 0 ? r.paceFadeSec+"s" : "+"+r.paceFadeSec+"s"}<span style={{ fontSize:11, color:C.midGray, fontWeight:400 }}>/mi</span>
+                                      </p>
+                                    </div>
+                                  )}
+                                  {r.hrDrift != null && (
+                                    <div>
+                                      <span style={{ fontSize:10, color:C.midGray, textTransform:"uppercase", letterSpacing:"0.08em" }}>HR drift</span>
+                                      <p style={{ color:r.hrDrift<=8?C.green:r.hrDrift<=15?C.amber:C.red, fontSize:20, fontWeight:900, margin:"1px 0 0", lineHeight:1 }}>
+                                        +{r.hrDrift}<span style={{ fontSize:11, color:C.midGray, fontWeight:400 }}>bpm</span>
+                                      </p>
+                                    </div>
+                                  )}
+                                  {r.held != null && (
+                                    <div style={{ marginLeft:"auto" }}>
+                                      <span style={{ fontSize:10, color:C.midGray, textTransform:"uppercase", letterSpacing:"0.08em" }}>Held</span>
+                                      <p style={{ color:r.held>=80?C.green:r.held>=60?C.amber:C.red, fontSize:20, fontWeight:900, margin:"1px 0 0", lineHeight:1 }}>{r.held}<span style={{ fontSize:11, color:C.midGray, fontWeight:400 }}>/100</span></p>
+                                    </div>
+                                  )}
+                                </div>
+                                {/* Pace fade progress bar */}
+                                <div style={{ height:5, background:C.light, borderRadius:3, overflow:"hidden" }}>
+                                  <div style={{ height:"100%", width:`${barW}%`, background:fc, borderRadius:3, transition:"width 0.4s" }} />
+                                </div>
+                                {/* Mile-by-mile pace sparkline using inline SVG */}
+                                {r.mileChart.some(m => m.paceSec) && (() => {
+                                  const pts = r.mileChart.filter(m => m.paceSec);
+                                  const minP = Math.min(...pts.map(m=>m.paceSec));
+                                  const maxP = Math.max(...pts.map(m=>m.paceSec));
+                                  const range = maxP - minP || 1;
+                                  const W = 220, H = 36, pad = 4;
+                                  const x = (i) => pad + (i / (pts.length - 1)) * (W - 2*pad);
+                                  const y = (p) => H - pad - ((p - minP) / range) * (H - 2*pad);
+                                  const path = pts.map((m,i) => `${i===0?'M':'L'}${x(i).toFixed(1)},${y(m.paceSec).toFixed(1)}`).join(' ');
+                                  return (
+                                    <div style={{ marginTop:8 }}>
+                                      <span style={{ fontSize:10, color:C.midGray }}>Pace per mile (lower = faster)</span>
+                                      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display:"block", marginTop:4 }}>
+                                        <path d={path} fill="none" stroke={fc} strokeWidth="1.8" strokeLinejoin="round" />
+                                        {pts.map((m,i) => <circle key={i} cx={x(i)} cy={y(m.paceSec)} r="2.5" fill={fc} />)}
+                                      </svg>
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Cross-run HR drift profile — normalized quintile bar chart */}
+                      {longRunHRProfile && longRunHRProfile.length >= 3 && (
+                        <div style={{ background:C.offWhite, borderRadius:8, padding:"14px 16px", border:`1px solid ${C.border}` }}>
+                          <p style={{ color:C.navy, fontSize:14, fontWeight:700, margin:"0 0 4px" }}>HR Drift Profile Across All Long Runs</p>
+                          <p style={{ color:C.midGray, fontSize:12, margin:"0 0 12px" }}>
+                            Each long run divided into 5 equal segments. Shows your average heart rate from start to finish — how much cardiac drift is typical.
+                          </p>
+                          <div style={{ display:"flex", alignItems:"flex-end", gap:8, height:90 }}>
+                            {longRunHRProfile.map((q, i) => {
+                              const minHR = Math.min(...longRunHRProfile.map(x=>x.avgHR));
+                              const maxHR = Math.max(...longRunHRProfile.map(x=>x.avgHR));
+                              const barH = maxHR > minHR ? 20 + ((q.avgHR - minHR) / (maxHR - minHR)) * 60 : 50;
+                              const barC = i < 2 ? C.green : i === 2 ? C.amber : C.red;
+                              return (
+                                <div key={q.label} style={{ flex:1, textAlign:"center" }}>
+                                  <p style={{ fontSize:11, fontWeight:700, color:C.midGray, margin:"0 0 4px" }}>{Math.round(q.avgHR)}</p>
+                                  <div style={{ height:barH, background:`${barC}cc`, borderRadius:"3px 3px 0 0", marginBottom:4 }} />
+                                  <p style={{ fontSize:10, color:C.midGray, margin:0 }}>{q.label}</p>
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <p style={{ fontSize:11, color:C.midGray, margin:"10px 0 0", fontStyle:"italic" }}>
+                            {longRunHRProfile.length >= 2 && (() => {
+                              const rise = longRunHRProfile[longRunHRProfile.length-1].avgHR - longRunHRProfile[0].avgHR;
+                              return rise <= 5 ? "✓ Minimal cardiac drift — excellent aerobic efficiency"
+                                : rise <= 12 ? "Moderate drift — normal for marathon training distances"
+                                : "High drift — consider slowing early miles to conserve";
+                            })()}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {longRuns90Min.length > 0 && (
                   <div style={{ borderTop:`1px solid ${C.light}`, paddingTop:16, marginTop:16 }}>
@@ -3147,22 +3342,12 @@ export default function Dashboard() {
 
                 {/* Run header */}
                 <div style={{ background:`linear-gradient(105deg,${C.navy},${C.navyMid})`, borderRadius:12, padding:"22px 28px", marginBottom:20, borderLeft:`4px solid ${C.red}` }}>
-                  <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12, marginBottom:4 }}>
-                    <p style={{ color:"rgba(255,255,255,0.6)", fontSize:12, fontWeight:700, letterSpacing:"0.12em", textTransform:"uppercase", margin:0 }}>Run Detail</p>
-                    {r.stravaId && (
-                      <a href={`https://www.strava.com/activities/${r.stravaId}`} target="_blank" rel="noopener noreferrer"
-                        style={{ fontSize:11, fontWeight:600, color:"rgba(255,255,255,0.6)", background:"rgba(255,255,255,0.1)", borderRadius:4, padding:"3px 9px", textDecoration:"none", border:"1px solid rgba(255,255,255,0.2)", whiteSpace:"nowrap", flexShrink:0 }}>
-                        View on Strava ↗
-                      </a>
-                    )}
-                  </div>
+                  <p style={{ color:"rgba(255,255,255,0.6)", fontSize:12, fontWeight:700, letterSpacing:"0.12em", textTransform:"uppercase", margin:"0 0 6px" }}>Run Detail</p>
                   <p style={{ color:C.white, fontSize:28, fontWeight:900, margin:"0 0 4px", letterSpacing:"-0.02em" }}>{r.date}</p>
-                  {r.stravaName && <p style={{ color:"rgba(255,255,255,0.5)", fontSize:14, fontStyle:"italic", margin:"0 0 8px" }}>{r.stravaName}</p>}
                   <div style={{ display:"flex", flexWrap:"wrap", gap:16 }}>
                     <span style={{ color:"rgba(255,255,255,0.8)", fontSize:16, fontWeight:700 }}>{kmToMi(r.dist).toFixed(2)} mi</span>
                     <span style={{ color:"rgba(255,255,255,0.6)", fontSize:15 }}>{r.pace}/mi</span>
                     {r.avgHR && <span style={{ color:"rgba(255,255,255,0.6)", fontSize:15 }}>{Math.round(r.avgHR)} bpm avg</span>}
-                    {r.avgPower && <span style={{ color:"rgba(255,255,255,0.5)", fontSize:14 }}>{r.avgPower} W avg</span>}
                   </div>
                 </div>
 
@@ -3178,100 +3363,34 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                {/* Mile splits — Strava boundaries fused with Apple Health metrics */}
-                {r.splits && r.splits.length > 0 && (() => {
-                  const hasPace  = r.splits.some(s => s.paceSec);
-                  const hasPower = r.splits.some(s => s.avgPower);
-                  const hasGCT   = r.splits.some(s => s.avgGCT);
-                  const hasVO    = r.splits.some(s => s.avgVO);
-                  const fullMilesWithPace = r.splits.filter(s => s.distMiles != null && s.distMiles >= 0.85 && s.paceSec);
-                  const fastest = fullMilesWithPace.length ? fullMilesWithPace.reduce((a,b) => a.paceSec < b.paceSec ? a : b) : null;
-                  const slowest = fullMilesWithPace.length ? fullMilesWithPace.reduce((a,b) => a.paceSec > b.paceSec ? a : b) : null;
-                  return (
-                    <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)", marginTop:16 }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14, flexWrap:"wrap" }}>
-                        <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:0 }}>Mile Splits ({r.splits.length})</p>
-                        {r.stravaId && <span style={{ fontSize:11, color:C.midGray, background:C.light, padding:"2px 8px", borderRadius:10 }}>via Strava</span>}
-                      </div>
-                      <div style={{ overflowX:"auto" }}>
-                        <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:F, fontSize:13 }}>
-                          <thead>
-                            <tr style={{ background:C.offWhite, borderBottom:`2px solid ${C.border}` }}>
-                              {[
-                                { h:"Mile",    left:true  },
-                                { h:"Pace",    left:false },
-                                { h:"Time",    left:false },
-                                { h:"HR avg/max", left:false },
-                                hasPower && { h:"Power", left:false },
-                                hasGCT   && { h:"GCT",   left:false },
-                                hasVO    && { h:"Vert Osc", left:false },
-                              ].filter(Boolean).map(col => (
-                                <th key={col.h} style={{ textAlign:col.left?"left":"right", padding:"7px 10px", color:C.midGray, fontWeight:600, fontSize:11, letterSpacing:"0.06em", textTransform:"uppercase", whiteSpace:"nowrap" }}>{col.h}</th>
-                              ))}
+                {/* Splits if available */}
+                {r.splits && r.splits.length > 0 && (
+                  <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)", marginTop:16 }}>
+                    <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:"0 0 14px" }}>Splits ({r.splits.length})</p>
+                    <div style={{ overflowX:"auto" }}>
+                      <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:F, fontSize:13 }}>
+                        <thead>
+                          <tr style={{ borderBottom:`2px solid ${C.border}` }}>
+                            {["Split","Dist (km)","Time","Avg HR","Max HR"].map(h => (
+                              <th key={h} style={{ textAlign:h==="Split"?"left":"right", padding:"6px 10px", color:C.midGray, fontWeight:600, fontSize:11, letterSpacing:"0.06em", textTransform:"uppercase" }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {r.splits.map((s, i) => (
+                            <tr key={i} style={{ borderBottom:`1px solid ${C.light}`, background:i%2===0?C.white:C.offWhite }}>
+                              <td style={{ padding:"7px 10px", fontWeight:600 }}>{s.split}</td>
+                              <td style={{ textAlign:"right", padding:"7px 10px" }}>{s.distKm?.toFixed(2) ?? "—"}</td>
+                              <td style={{ textAlign:"right", padding:"7px 10px" }}>{s.movingTimeSec ? `${Math.floor(s.movingTimeSec/60)}:${String(Math.round(s.movingTimeSec%60)).padStart(2,"0")}` : "—"}</td>
+                              <td style={{ textAlign:"right", padding:"7px 10px", fontWeight:700, color:hrColor(s.avgHR) }}>{s.avgHR ? `${Math.round(s.avgHR)}` : "—"}</td>
+                              <td style={{ textAlign:"right", padding:"7px 10px", color:hrColor(s.maxHR) }}>{s.maxHR ? `${Math.round(s.maxHR)}` : "—"}</td>
                             </tr>
-                          </thead>
-                          <tbody>
-                            {r.splits.map((s, i) => {
-                              const timeLabel = s.movingTimeSec
-                                ? `${Math.floor(s.movingTimeSec/60)}:${String(Math.round(s.movingTimeSec%60)).padStart(2,"0")}`
-                                : "—";
-                              const isPartial = s.distMiles != null && s.distMiles < 0.85;
-                              const isFastest = fastest && s === fastest;
-                              const isSlowest = slowest && fullMilesWithPace.length > 2 && s === slowest;
-                              return (
-                                <tr key={i} style={{ borderBottom:`1px solid ${C.light}`, background:i%2===0?C.white:C.offWhite }}>
-                                  <td style={{ padding:"8px 10px", fontWeight:700, whiteSpace:"nowrap" }}>
-                                    {s.mile ?? i+1}
-                                    {isPartial && <span style={{ marginLeft:5, fontSize:10, color:C.midGray, fontWeight:400 }}>({s.distMiles?.toFixed(2)} mi)</span>}
-                                    {isFastest && <span style={{ marginLeft:5, fontSize:10, color:C.green, fontWeight:700 }}>▲</span>}
-                                    {isSlowest && <span style={{ marginLeft:5, fontSize:10, color:C.amber, fontWeight:700 }}>▼</span>}
-                                  </td>
-                                  <td style={{ textAlign:"right", padding:"8px 10px", fontFamily:"monospace", fontWeight:700, color: hasPace ? (isFastest?C.green:isSlowest?C.amber:C.navy) : C.midGray }}>
-                                    {s.paceSec ? paceSecToLabel(Math.round(s.paceSec)) : "—"}
-                                  </td>
-                                  <td style={{ textAlign:"right", padding:"8px 10px", color:C.midGray }}>{timeLabel}</td>
-                                  <td style={{ textAlign:"right", padding:"8px 10px" }}>
-                                    {s.avgHR ? (
-                                      <span>
-                                        <span style={{ fontWeight:700, color:hrColor(s.avgHR) }}>{Math.round(s.avgHR)}</span>
-                                        {s.maxHR && <span style={{ color:C.midGray, fontSize:11 }}> / {Math.round(s.maxHR)}</span>}
-                                      </span>
-                                    ) : "—"}
-                                  </td>
-                                  {hasPower && <td style={{ textAlign:"right", padding:"8px 10px", color:C.midGray }}>{s.avgPower ? `${Math.round(s.avgPower)}W` : "—"}</td>}
-                                  {hasGCT   && <td style={{ textAlign:"right", padding:"8px 10px", color:C.midGray }}>{s.avgGCT ? `${Math.round(s.avgGCT)}ms` : "—"}</td>}
-                                  {hasVO    && <td style={{ textAlign:"right", padding:"8px 10px", color:C.midGray }}>{s.avgVO ? `${s.avgVO.toFixed(1)}cm` : "—"}</td>}
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                      {fastest && slowest && fullMilesWithPace.length >= 3 && (
-                        <div style={{ display:"flex", gap:16, flexWrap:"wrap", marginTop:12, paddingTop:10, borderTop:`1px solid ${C.light}` }}>
-                          <span style={{ fontSize:12, color:C.midGray }}>
-                            <span style={{ fontWeight:700, color:C.green }}>Fastest: </span>
-                            Mile {fastest.mile} · {paceSecToLabel(Math.round(fastest.paceSec))}/mi
-                          </span>
-                          <span style={{ fontSize:12, color:C.midGray }}>
-                            <span style={{ fontWeight:700, color:C.amber }}>Slowest: </span>
-                            Mile {slowest.mile} · {paceSecToLabel(Math.round(slowest.paceSec))}/mi
-                          </span>
-                          {(() => {
-                            const spread = slowest.paceSec - fastest.paceSec;
-                            return (
-                              <span style={{ fontSize:12, color:spread > 90 ? C.amber : C.midGray }}>
-                                <span style={{ fontWeight:700 }}>Spread: </span>
-                                {paceSecToLabel(Math.round(spread))}/mi
-                                {spread > 90 && <span style={{ color:C.amber }}> · high variability</span>}
-                              </span>
-                            );
-                          })()}
-                        </div>
-                      )}
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
-                  );
-                })()}
+                  </div>
+                )}
               </div>
             );
           }
