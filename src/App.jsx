@@ -438,21 +438,21 @@ function extractVO2MaxData(json) {
 
 /* ─── Motivational Quotes ────────────────────────────────── */
 const MARATHON_QUOTES = [
-  { q:"The miracle isn't that I finished. The miracle is that I had the courage to start.", a:"John Bingham" },
-  { q:"Run when you can, walk if you have to, crawl if you must; just never give up.", a:"Dean Karnazes" },
-  { q:"Pain is temporary. Quitting lasts forever.", a:"Lance Armstrong" },
-  { q:"Every morning in Africa, a gazelle wakes up knowing it must outrun the fastest lion. Every morning a lion wakes up knowing it must outrun the slowest gazelle. It doesn't matter whether you are a lion or a gazelle — when the sun comes up, you'd better be running.", a:"African Proverb" },
-  { q:"Ask yourself: Can I give more? The answer is usually: Yes.", a:"Paul Tergat" },
-  { q:"Don't dream of winning. Train for it.", a:"Mo Farah" },
-  { q:"The will to win means nothing without the will to prepare.", a:"Juma Ikangaa" },
-  { q:"To give anything less than your best is to sacrifice the gift.", a:"Steve Prefontaine" },
-  { q:"What seems hard now will one day be your warm-up.", a:"Unknown" },
-  { q:"Aerobic capacity is the ceiling. Your job right now is to raise it — one easy mile at a time.", a:"Steve Magness" },
-  { q:"Champions are made from something they have deep inside them — a desire, a dream, a vision.", a:"Muhammad Ali" },
-  { q:"It's supposed to be hard. The hard is what makes it great.", a:"A League of Their Own" },
-  { q:"Believe that you can run farther or faster. Believe that you're young enough, old enough, strong enough.", a:"Amby Burfoot" },
-  { q:"The body achieves what the mind believes.", a:"Unknown" },
-  { q:"I always loved running. It was something you could do by yourself, under your own power.", a:"Jesse Owens" },
+  { q:"26.2 miles is just 1 mile done 26 times, plus 0.2 miles. You've run a mile before probably.", a:"Definitely a Coach" },
+  { q:"The human body was not designed to run a marathon, but here we are I guess.", a:"A Doctor, Probably" },
+  { q:"Running is just falling forward repeatedly for several hours. Gravity is doing most of the work.", a:"Physics" },
+  { q:"If God wanted us to run 26 miles he would have made the finish line closer.", a:"Someone Sensible" },
+  { q:"You miss 100% of the naps you don't take. But also you need to run today.", a:"Wayne Gretzky (adapted)" },
+  { q:"Some people run marathons. Other people have hobbies they enjoy. Both are valid.", a:"A Therapist" },
+  { q:"Chicago has deep dish pizza. You are running 26.2 miles to a city full of deep dish pizza. Keep going.", a:"Your Stomach" },
+  { q:"Chafing is just your body's way of telling you it was involved.", a:"Your Thighs" },
+  { q:"You trained in January. You trained in February. You are going to finish this race and then eat an unreasonable amount of food.", a:"The Training Plan" },
+  { q:"Every mile you run is a mile you have run. That is simply true.", a:"Philosophy" },
+  { q:"The hard part isn't the marathon. The hard part is explaining to people why you're doing a marathon.", a:"Every Marathon Dinner Party" },
+  { q:"Nobody has ever regretted finishing a long run. Many people have regretted starting one but that's different.", a:"Running Logic" },
+  { q:"Your legs will forgive you. Eventually. Probably by Thursday.", a:"Recovery Science" },
+  { q:"A marathon is just a long run. A long run is just a medium run but longer. A medium run is just a short run but more. You see where this is going.", a:"Reductionism" },
+  { q:"The toenail situation is temporary. The finishing medal is forever.", a:"Marathon Economics" },
 ];
 function getTodayQuote() {
   return MARATHON_QUOTES[Math.floor(Date.now()/864e5) % MARATHON_QUOTES.length];
@@ -482,7 +482,15 @@ function WeeklySummaryAI({ weekData, allData }) {
       easyPct, weeksToRace, avgHRAll30, totalMi, runsCount,
     } = allData;
     const today = new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"});
-    const prompt = `You are a marathon training coach. Write a 4-5 sentence training summary. Be direct and specific — use the actual numbers. Focus only on the 2-3 most important observations: load vs last week, intensity quality (easy %), and any risk signals (ACWR, efficiency). No generic encouragement. Second person. Return ONLY the paragraph.\n\nToday: ${today} | Race: Oct 11 2026 (${weeksToRace} wks out)\n${weekInProgress?"Week in progress ("+thisWeekMi+" mi so far, proj "+projectedMi+")":"Week complete: "+thisWeekMi+" mi"} | Runs: ${thisWeekRuns} | Avg HR: ${weekAvgHR??'n/a'} bpm | Pace: ${weekAvgPace??'n/a'}/mi | Elev: ${weekElev} ft\nvs last week: ${weekMiChangePct!=null?(weekMiChangePct>0?"+":"")+weekMiChangePct+"% ("+(weekMiChange>0?"+":"")+weekMiChange+" mi from "+prevCompletedMiles+" mi)":"n/a"}\n4-wk trend: ${trendDir||"unknown"} | Efficiency: ${effTrend||"unknown"} | ACWR: ${acwr?acwr.ratio+" ("+acwr.zone+")":"unknown"} | Easy%: ${easyPct??'n/a'}%\nHR zones: easy <150, moderate 150-165, hard 165+. Easy runs in the 140s bpm = normal for this athlete.`;
+    const trainingPhase = weeksToRace > 20 ? "Base Building" : weeksToRace > 12 ? "Aerobic Development" : weeksToRace > 8 ? "Race-Specific" : "Taper";
+    const phaseDesc = weeksToRace > 20
+      ? "building aerobic infrastructure — easy volume is the entire job right now"
+      : weeksToRace > 12
+      ? "aerobic engine is developing — long run progression is the priority"
+      : weeksToRace > 8
+      ? "marathon-specific phase — quality over quantity, race-pace work begins"
+      : "taper — protect the fitness already banked, trust the process";
+    const prompt = `You are a marathon training coach. Write a 4-5 sentence training summary for a runner preparing for the Bank of America Chicago Marathon on October 11, 2026. Be direct and specific — use the actual numbers. Reference where they are in their training cycle (${trainingPhase} phase, ${weeksToRace} weeks out). Focus on the 2-3 most important observations: load vs last week, intensity quality (easy %), and any risk signals. Frame everything relative to what matters at this stage of Chicago prep: ${phaseDesc}. No generic motivation. Second person. Return ONLY the paragraph.\n\nToday: ${today} | Race: Oct 11 2026 (${weeksToRace} wks out) | Phase: ${trainingPhase}\n${weekInProgress?"Week in progress ("+thisWeekMi+" mi so far, proj "+projectedMi+")":"Week complete: "+thisWeekMi+" mi"} | Runs: ${thisWeekRuns} | Avg HR: ${weekAvgHR??'n/a'} bpm | Pace: ${weekAvgPace??'n/a'}/mi | Elev: ${weekElev} ft\nvs last week: ${weekMiChangePct!=null?(weekMiChangePct>0?"+":"")+weekMiChangePct+"% ("+(weekMiChange>0?"+":"")+weekMiChange+" mi from "+prevCompletedMiles+" mi)":"n/a"}\n4-wk trend: ${trendDir||"unknown"} | Efficiency: ${effTrend||"unknown"} | ACWR: ${acwr?acwr.ratio+" ("+acwr.zone+")":"unknown"} | Easy%: ${easyPct??'n/a'}%\nHR zones: easy <150, moderate 150-165, hard 165+. Easy runs in the 140s bpm = normal for this athlete.`;
 
     setLoading(true); setError(null);
     const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY;
@@ -1815,7 +1823,11 @@ export default function Dashboard() {
           <div>
             {/* ═══ WEEKLY SUMMARY ═══ */}
             <section style={{ marginBottom: isMob ? 32 : 48 }}>
-              <SecTitle title="Weekly Summary" color={C.navy} />
+              {(() => {
+                const phaseLabel = weeksToRace > 20 ? "Base Building" : weeksToRace > 12 ? "Aerobic Development" : weeksToRace > 8 ? "Race-Specific" : "Taper";
+                const wkNum = Math.max(1, Math.ceil((new Date() - new Date("2026-01-19")) / (7 * 864e5)));
+                return <SecTitle title={`Weekly Summary · Wk ${wkNum} · ${phaseLabel} Phase`} color={C.navy} />;
+              })()}
               {(() => {
                 const weekElev = mToFt(thisWeekRuns.reduce((s,a)=>s+a.elev,0));
                 const weekHRRuns = thisWeekRuns.filter(r=>r.avgHR);
@@ -1840,6 +1852,9 @@ export default function Dashboard() {
                     <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:16 }}>
                       <p style={{ color:C.navy, fontWeight:700, fontSize: isMob ? 16 : 19, margin:0 }}>
                         {weekInProgress ? "Week in Progress" : "Most Recent Week"} · {thisWeekRange}
+                        {" "}<span style={{ color:C.midGray, fontWeight:400, fontSize:14 }}>
+                          · {weeksToRace > 20 ? "Base Building" : weeksToRace > 12 ? "Aerobic Dev" : weeksToRace > 8 ? "Race-Specific" : "Taper"} Phase
+                        </span>
                       </p>
                       {weekInProgress && <Badge label="Live" color={C.amber} />}
                     </div>
@@ -1924,55 +1939,95 @@ export default function Dashboard() {
 
                     {/* HR Zone Breakdown */}
                     {(() => {
-                      const zones = weeklyPolarized.current;
-                      const totalMin = zones.reduce((s,z) => s + z.minutes, 0);
+                      // 5-zone breakdown matching Apple Watch zones from screenshot
+                      // Zone 1: <138, Zone 2: 139–151, Zone 3: 152–164, Zone 4: 165–177, Zone 5: >178
+                      const ZONES_5 = [
+                        { id:"z1", label:"Zone 1", desc:"< 138 bpm", color:"#4FC3F7", textColor:"#0277BD", pctTarget:null, note:"Recovery" },
+                        { id:"z2", label:"Zone 2", desc:"139–151 bpm", color:"#81C784", textColor:"#2E7D32", pctTarget:null, note:"Aerobic Base" },
+                        { id:"z3", label:"Zone 3", desc:"152–164 bpm", color:"#CDDC39", textColor:"#827717", pctTarget:"target ≥50%", note:"Aerobic Threshold" },
+                        { id:"z4", label:"Zone 4", desc:"165–177 bpm", color:"#FFA726", textColor:"#E65100", pctTarget:null, note:"Lactate Threshold" },
+                        { id:"z5", label:"Zone 5", desc:"≥ 178 bpm", color:"#EF5350", textColor:"#B71C1C", pctTarget:null, note:"VO₂ Max" },
+                      ];
+
+                      // Calculate time in each zone from this week's runs
+                      let totalMin = 0;
+                      const zoneMinutes = { z1:0, z2:0, z3:0, z4:0, z5:0 };
+
+                      thisWeekRuns.forEach(r => {
+                        if (r.avgHR == null) return;
+                        const min = r.movingTimeSec ? r.movingTimeSec / 60 : 0;
+                        totalMin += min;
+                        // Estimate zone from avg HR (approximation — per-minute data would be more precise)
+                        if      (r.avgHR < 138) zoneMinutes.z1 += min;
+                        else if (r.avgHR < 152) zoneMinutes.z2 += min;
+                        else if (r.avgHR < 165) zoneMinutes.z3 += min;
+                        else if (r.avgHR < 178) zoneMinutes.z4 += min;
+                        else                    zoneMinutes.z5 += min;
+                      });
+
                       if (!totalMin) return null;
-                      const easyZ = zones.find(z => z.id === "easy");
-                      const modZ  = zones.find(z => z.id === "medium");
-                      const hardZ = zones.find(z => z.id === "hard");
-                      const fmtMin = m => m >= 60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m}m`;
+
+                      const fmtMin = m => {
+                        const rounded = Math.round(m);
+                        return rounded >= 60 ? `${Math.floor(rounded/60)}h ${rounded%60}m` : `${rounded}m`;
+                      };
+
+                      const maxPct = Math.max(...Object.values(zoneMinutes).map(m => m/totalMin*100));
+
                       return (
                         <div style={{ borderTop:`1px solid ${C.light}`, paddingTop:14, marginTop:4 }}>
-                          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+                          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
                             <div>
                               <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:"0 0 2px" }}>HR Zone Breakdown · This Week</p>
                               <p style={{ color:C.midGray, fontSize:12, margin:0 }}>
-                                Time-in-zone by avg HR. Target: ≥80% easy.{" "}
-                                {easyZ?.pct >= 80
-                                  ? <span style={{ color:C.green, fontWeight:600 }}>✓ On target</span>
-                                  : easyZ?.pct > 0 ? <span style={{ color:C.amber, fontWeight:600 }}>↑ More easy running needed</span>
-                                  : null}
+                                Estimated time in each heart rate zone. Zones based on Apple Watch thresholds.
                               </p>
                             </div>
                             <p style={{ color:C.midGray, fontSize:12, margin:0, flexShrink:0, marginLeft:12 }}>{fmtMin(totalMin)} total</p>
                           </div>
-                          <div style={{ display:"grid", gridTemplateColumns: isMob ? "1fr" : "repeat(3,1fr)", gap:10 }}>
-                            {[
-                              { z:easyZ,  icon:"🟢", label:"Easy",     desc:"<150 bpm",   target:"≥80% goal" },
-                              { z:modZ,   icon:"🟡", label:"Moderate", desc:"150–165 bpm", target:"grey zone" },
-                              { z:hardZ,  icon:"🔴", label:"Hard",     desc:">165 bpm",    target:"key sessions" },
-                            ].map(({ z, icon, label, desc, target }) => {
-                              if (!z) return null;
-                              const pct  = z.pct ?? 0;
-                              const mins = z.minutes ?? 0;
-                              const barColor = z.id==="easy" ? C.green : z.id==="medium" ? C.amber : C.red;
+
+                          {/* Stacked bar visualization */}
+                          <div style={{ display:"flex", height:14, borderRadius:7, overflow:"hidden", marginBottom:14, gap:1 }}>
+                            {ZONES_5.map(zone => {
+                              const pct = totalMin > 0 ? zoneMinutes[zone.id] / totalMin * 100 : 0;
+                              if (pct < 0.5) return null;
                               return (
-                                <div key={z.id} style={{ background:C.white, borderRadius:6, padding:"10px 12px", border:`1px solid ${barColor}25`, borderTop:`2px solid ${barColor}` }}>
-                                  <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:6 }}>
-                                    <span style={{ fontSize:13 }}>{icon}</span>
-                                    <p style={{ color:C.darkGray, fontSize:12, fontWeight:700, margin:0 }}>{label}</p>
+                                <div key={zone.id} style={{ height:"100%", width:`${pct}%`, background:zone.color, transition:"width 0.4s ease" }} title={`${zone.label}: ${pct.toFixed(0)}%`} />
+                              );
+                            })}
+                          </div>
+
+                          {/* Zone rows */}
+                          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                            {ZONES_5.map(zone => {
+                              const mins = zoneMinutes[zone.id];
+                              const pct = totalMin > 0 ? mins / totalMin * 100 : 0;
+                              const barWidth = maxPct > 0 ? pct / maxPct * 100 : 0;
+                              return (
+                                <div key={zone.id} style={{ display:"grid", gridTemplateColumns:"80px 1fr 70px 52px", alignItems:"center", gap:10 }}>
+                                  <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                                    <div style={{ width:10, height:10, borderRadius:"50%", background:zone.color, flexShrink:0 }} />
+                                    <span style={{ fontSize:12, fontWeight:700, color:zone.textColor }}>{zone.label}</span>
                                   </div>
-                                  <p style={{ color:barColor, fontSize:26, fontWeight:900, margin:"0 0 1px", lineHeight:1, letterSpacing:"-0.02em" }}>
-                                    {pct.toFixed(0)}<span style={{ fontSize:14, fontWeight:400, marginLeft:2 }}>%</span>
-                                  </p>
-                                  <p style={{ color:C.midGray, fontSize:11, margin:"2px 0 6px" }}>{fmtMin(mins)} · {desc}</p>
-                                  <div style={{ background:C.light, borderRadius:3, height:4, overflow:"hidden" }}>
-                                    <div style={{ height:"100%", width:`${Math.min(pct,100)}%`, background:barColor, borderRadius:3 }} />
+                                  <div style={{ position:"relative", height:8, background:C.light, borderRadius:4, overflow:"hidden" }}>
+                                    <div style={{ position:"absolute", left:0, top:0, height:"100%", width:`${barWidth}%`, background:zone.color, borderRadius:4, transition:"width 0.4s ease" }} />
                                   </div>
-                                  <p style={{ color:C.midGray, fontSize:10, margin:"4px 0 0", fontStyle:"italic" }}>{target}</p>
+                                  <span style={{ fontSize:12, color:C.midGray, textAlign:"right", whiteSpace:"nowrap" }}>{fmtMin(mins)}</span>
+                                  <span style={{ fontSize:12, fontWeight:700, color:pct > 0 ? zone.textColor : C.light, textAlign:"right" }}>
+                                    {pct > 0 ? `${pct.toFixed(0)}%` : "—"}
+                                  </span>
                                 </div>
                               );
                             })}
+                          </div>
+
+                          {/* Zone reference legend */}
+                          <div style={{ display:"flex", flexWrap:"wrap", gap:"4px 14px", marginTop:10 }}>
+                            {ZONES_5.map(zone => (
+                              <span key={zone.id} style={{ fontSize:11, color:C.midGray }}>
+                                <span style={{ fontWeight:600, color:zone.textColor }}>{zone.label}</span> {zone.desc} · {zone.note}
+                              </span>
+                            ))}
                           </div>
                         </div>
                       );
@@ -1981,6 +2036,167 @@ export default function Dashboard() {
                 );
               })()}
             </section>
+
+            {/* ═══ CHICAGO MARATHON TRAINING CYCLE ═══ */}
+            {(() => {
+              const TODAY_TS = new Date();
+              const TRAINING_START_TS = new Date("2026-01-19T00:00:00");
+              const RACE_DATE_TS = new Date("2026-10-11T07:30:00");
+              const totalDays = (RACE_DATE_TS - TRAINING_START_TS) / 864e5;
+              const daysElapsed = Math.max(0, (TODAY_TS - TRAINING_START_TS) / 864e5);
+              const pctDone = Math.min(100, (daysElapsed / totalDays * 100));
+
+              const SEASONS = [
+                {
+                  id: "base",
+                  label: "Base Building",
+                  shortLabel: "Base",
+                  start: new Date("2026-01-19"),
+                  end:   new Date("2026-05-11"),
+                  color: "#4FC3F7",
+                  textColor: "#0277BD",
+                  icon: "🏗️",
+                  desc: "Building aerobic infrastructure. Easy miles only. Volume over intensity.",
+                  weeksLabel: "Wks 1–16",
+                },
+                {
+                  id: "aerobic",
+                  label: "Aerobic Development",
+                  shortLabel: "Aerobic Dev",
+                  start: new Date("2026-05-11"),
+                  end:   new Date("2026-07-06"),
+                  color: "#81C784",
+                  textColor: "#2E7D32",
+                  icon: "⚡",
+                  desc: "Long run progression, peak mileage weeks. Aerobic engine is developing.",
+                  weeksLabel: "Wks 17–24",
+                },
+                {
+                  id: "specific",
+                  label: "Race-Specific",
+                  shortLabel: "Race-Specific",
+                  start: new Date("2026-07-06"),
+                  end:   new Date("2026-09-21"),
+                  color: "#FFA726",
+                  textColor: "#E65100",
+                  icon: "🎯",
+                  desc: "Marathon-pace long runs, tempo work. Quality over quantity.",
+                  weeksLabel: "Wks 25–35",
+                },
+                {
+                  id: "taper",
+                  label: "Taper",
+                  shortLabel: "Taper",
+                  start: new Date("2026-09-21"),
+                  end:   new Date("2026-10-11"),
+                  color: "#EF5350",
+                  textColor: "#B71C1C",
+                  icon: "🪶",
+                  desc: "Protect fitness. Reduce volume. Trust the process.",
+                  weeksLabel: "Wks 36–38",
+                },
+              ];
+
+              const currentSeason = SEASONS.find(s => TODAY_TS >= s.start && TODAY_TS < s.end) ?? SEASONS[SEASONS.length - 1];
+              const weekNum = Math.max(1, Math.ceil(daysElapsed / 7));
+
+              // Phase-specific contextual message
+              const phaseMessages = {
+                base: `Week ${weekNum} of base building. Every easy mile is laying a brick. Mitochondria don't care that it feels slow.`,
+                aerobic: `You're in the aerobic development phase — this is where the engine actually gets built. Long runs and consistency are everything right now.`,
+                specific: `Race-specific phase. The base is done. Now you tune it. MP long runs start mattering.`,
+                taper: `Taper time. The work is banked. Your job is to show up rested on October 11th.`,
+              };
+
+              return (
+                <section style={{ marginBottom: isMob ? 32 : 48 }}>
+                  <SecTitle title="Chicago Marathon Training Cycle" color={C.navy} />
+                  <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
+
+                    {/* Current phase callout */}
+                    <div style={{
+                      background:`${currentSeason.color}18`,
+                      border:`1px solid ${currentSeason.color}60`,
+                      borderLeft:`5px solid ${currentSeason.color}`,
+                      borderRadius:8, padding:"14px 18px", marginBottom:20,
+                      display:"flex", alignItems:"center", gap:14, flexWrap:"wrap",
+                    }}>
+                      <span style={{ fontSize:28 }}>{currentSeason.icon}</span>
+                      <div style={{ flex:1, minWidth:180 }}>
+                        <p style={{ color:currentSeason.textColor, fontSize:11, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", margin:"0 0 2px" }}>
+                          Current Phase · Week {weekNum}
+                        </p>
+                        <p style={{ color:C.darkGray, fontSize:17, fontWeight:800, margin:"0 0 3px" }}>{currentSeason.label}</p>
+                        <p style={{ color:C.midGray, fontSize:13, margin:0, lineHeight:1.5 }}>{phaseMessages[currentSeason.id]}</p>
+                      </div>
+                      <div style={{ textAlign:"center", flexShrink:0 }}>
+                        <p style={{ color:C.midGray, fontSize:11, textTransform:"uppercase", letterSpacing:"0.09em", margin:"0 0 2px", fontWeight:600 }}>Race Day</p>
+                        <p style={{ color:C.darkGray, fontSize:15, fontWeight:800, margin:0 }}>Oct 11</p>
+                        <p style={{ color:C.midGray, fontSize:12, margin:0 }}>{weeksToRace} wks away</p>
+                      </div>
+                    </div>
+
+                    {/* Timeline progress bar */}
+                    <div style={{ marginBottom:6 }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                        <span style={{ fontSize:12, color:C.midGray }}>Training Start · Jan 19</span>
+                        <span style={{ fontSize:12, color:C.midGray }}>Race Day · Oct 11</span>
+                      </div>
+                      <div style={{ position:"relative", height:10, background:C.light, borderRadius:5, overflow:"visible", marginBottom:18 }}>
+                        {/* Phase segments */}
+                        {SEASONS.map(s => {
+                          const segStart = Math.max(0, (s.start - TRAINING_START_TS) / (RACE_DATE_TS - TRAINING_START_TS) * 100);
+                          const segEnd   = Math.min(100, (s.end   - TRAINING_START_TS) / (RACE_DATE_TS - TRAINING_START_TS) * 100);
+                          const segWidth = segEnd - segStart;
+                          return (
+                            <div key={s.id} style={{
+                              position:"absolute", left:`${segStart}%`, width:`${segWidth}%`,
+                              height:"100%", background:s.color, opacity:0.5,
+                            }} />
+                          );
+                        })}
+                        {/* Progress fill */}
+                        <div style={{ position:"absolute", left:0, width:`${pctDone}%`, height:"100%", background:currentSeason.color, borderRadius:5, opacity:0.9 }} />
+                        {/* Current position dot */}
+                        <div style={{
+                          position:"absolute", left:`${Math.min(pctDone, 97)}%`, top:"50%",
+                          transform:"translate(-50%,-50%)",
+                          width:14, height:14, borderRadius:"50%",
+                          background:currentSeason.color, border:"2px solid white",
+                          boxShadow:"0 1px 4px rgba(0,0,0,0.3)",
+                        }} />
+                      </div>
+                    </div>
+
+                    {/* Phase cards */}
+                    <div style={{ display:"grid", gridTemplateColumns: isMob ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10 }}>
+                      {SEASONS.map(s => {
+                        const isCurrent = s.id === currentSeason.id;
+                        const isPast = TODAY_TS >= s.end;
+                        return (
+                          <div key={s.id} style={{
+                            background: isCurrent ? `${s.color}12` : isPast ? C.offWhite : C.white,
+                            border: isCurrent ? `2px solid ${s.color}` : `1px solid ${C.border}`,
+                            borderTop: `4px solid ${isCurrent || isPast ? s.color : C.border}`,
+                            borderRadius:8, padding:"12px 14px",
+                            opacity: isPast && !isCurrent ? 0.7 : 1,
+                          }}>
+                            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:4 }}>
+                              <span style={{ fontSize:16 }}>{s.icon}</span>
+                              {isCurrent && <span style={{ fontSize:10, fontWeight:700, color:s.textColor, background:`${s.color}30`, borderRadius:3, padding:"1px 5px", letterSpacing:"0.06em" }}>NOW</span>}
+                              {isPast && !isCurrent && <span style={{ fontSize:10, color:C.midGray }}>✓</span>}
+                            </div>
+                            <p style={{ color: isCurrent ? s.textColor : C.darkGray, fontSize:13, fontWeight:700, margin:"0 0 2px", lineHeight:1.2 }}>{s.label}</p>
+                            <p style={{ color:C.midGray, fontSize:11, margin:"0 0 4px" }}>{s.weeksLabel}</p>
+                            <p style={{ color:C.midGray, fontSize:11, margin:0, lineHeight:1.5, display: isMob ? "none" : "block" }}>{s.desc}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </section>
+              );
+            })()}
 
             {/* ═══ AEROBIC FITNESS PROFILE ═══ */}
             {(() => {
