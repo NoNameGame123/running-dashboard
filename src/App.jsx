@@ -236,11 +236,29 @@ function createSplitsFromHeartRateData(w, distKm) {
   });
 }
 
-function transformAppleHealthData(json) {
+function transformAppleHealthData(json, debugCallback) {
   if (!json?.workouts?.length) return [];
   const workouts = [];
+  
+  // Log all unique activity types found — critical for debugging filter mismatches
+  const typeCounts = {};
   json.workouts.forEach(w => {
-    if (w.activity_type !== 'HKWorkoutActivityTypeRunning') return;
+    const t = w.activity_type ?? w.workoutActivityType ?? w.activityType ?? "(missing)";
+    typeCounts[t] = (typeCounts[t] || 0) + 1;
+  });
+  if (debugCallback) debugCallback(`Activity types in JSON: ${JSON.stringify(typeCounts)}`, "info");
+
+  const RUNNING_TYPES = new Set([
+    'HKWorkoutActivityTypeRunning',
+    'running',
+    'Running',
+    'RUNNING',
+  ]);
+
+  json.workouts.forEach(w => {
+    // Check all plausible field names for activity type
+    const actType = w.activity_type ?? w.workoutActivityType ?? w.activityType ?? "";
+    if (!RUNNING_TYPES.has(actType)) return;
     try {
       const startDate = w.start_date ? new Date(w.start_date) : new Date();
       const dateStr = startDate.toISOString().slice(0, 10);
@@ -822,6 +840,9 @@ export default function Dashboard() {
   const [patView, setPatView] = useState('dow');
   const [econView, setEconView] = useState('rolling');
   const [longRunView, setLongRunView] = useState('chart');
+  const [selectedRun, setSelectedRun] = useState(null);
+  const [runSort, setRunSort]         = useState({ key:"date", dir:"desc" });
+  const [runFilter, setRunFilter]     = useState("");
   const [debugLog, setDebugLog]     = useState([]);
   const [showDebug, setShowDebug]   = useState(false);
 
@@ -848,7 +869,7 @@ export default function Dashboard() {
         const workoutCount = json?.workouts?.length ?? 0;
         addDebug(`JSON parsed OK. workouts: ${workoutCount}`, workoutCount > 0 ? "ok" : "warn");
         if (workoutCount === 0) addDebug("⚠️ workouts array is empty or missing — check JSON structure", "warn");
-        const transformed = transformAppleHealthData(json);
+        const transformed = transformAppleHealthData(json, addDebug);
         addDebug(`Transformed runs: ${transformed.length}`, transformed.length > 0 ? "ok" : "warn");
         if (transformed.length === 0 && workoutCount > 0) addDebug("⚠️ Workouts present but none transformed — activity type filter may be dropping them all", "warn");
         setRaw(transformed);
@@ -1480,6 +1501,7 @@ export default function Dashboard() {
   const TABS = [
     { id:"overview", label:"Training Overview" },
     { id:"report",   label:"Coach's Report"    },
+    { id:"rawstats", label:"Raw Stats"          },
   ];
 
   if (loading) return (
@@ -1659,7 +1681,7 @@ export default function Dashboard() {
       <div style={{ background:C.white, borderBottom:`1px solid ${C.border}`, position:"sticky", top:0, zIndex:10, overflowX:"auto" }}>
         <div style={{ maxWidth:980, margin:"0 auto", padding:`0 ${px}`, display:"flex" }}>
           {TABS.map(t => (
-            <button key={t.id} onClick={()=>setTab(t.id)} style={{
+            <button key={t.id} onClick={()=>{ setTab(t.id); setSelectedRun(null); }} style={{
               background:"none", border:"none",
               borderBottom: tab===t.id ? `3px solid ${C.red}` : "3px solid transparent",
               color:         tab===t.id ? C.navy : C.midGray,
@@ -2937,6 +2959,227 @@ export default function Dashboard() {
             />
           </div>
         )}
+
+        {tab==="rawstats" && (() => {
+          const COL_DEFS = [
+            { key:"date",          label:"Date",       fmt: r => r.date,                                             align:"left"  },
+            { key:"dist",          label:"Miles",      fmt: r => kmToMi(r.dist).toFixed(2),                         align:"right", num:true },
+            { key:"pace",          label:"Pace",       fmt: r => r.pace ?? "—",                                     align:"right" },
+            { key:"movingTimeSec", label:"Time",       fmt: r => r.movingTimeSec ? `${Math.floor(r.movingTimeSec/3600)?Math.floor(r.movingTimeSec/3600)+"h ":""}${Math.floor((r.movingTimeSec%3600)/60)}m ${Math.round(r.movingTimeSec%60)}s` : "—", align:"right" },
+            { key:"avgHR",         label:"Avg HR",     fmt: r => r.avgHR ? `${Math.round(r.avgHR)} bpm` : "—",      align:"right", num:true },
+            { key:"avgCadence",    label:"Cadence",    fmt: r => r.avgCadence ? `${Math.round(r.avgCadence)} spm` : "—", align:"right", num:true },
+            { key:"timeOfDay",     label:"Time of Day",fmt: r => r.timeOfDay ?? "—",                                align:"left"  },
+          ];
+
+          // Sort + filter
+          const filtered = [...runs].filter(r => {
+            if (!runFilter) return true;
+            const q = runFilter.toLowerCase();
+            return r.date.includes(q) || (r.timeOfDay||"").includes(q) || (r.type||"").toLowerCase().includes(q);
+          });
+          const sorted = filtered.sort((a, b) => {
+            const col = COL_DEFS.find(c => c.key === runSort.key);
+            let av, bv;
+            if (runSort.key === "date") { av = a.date; bv = b.date; }
+            else if (runSort.key === "dist") { av = a.dist; bv = b.dist; }
+            else if (runSort.key === "pace") { av = a.paceSec ?? 9999; bv = b.paceSec ?? 9999; }
+            else if (runSort.key === "movingTimeSec") { av = a.movingTimeSec ?? 0; bv = b.movingTimeSec ?? 0; }
+            else if (runSort.key === "avgHR") { av = a.avgHR ?? 0; bv = b.avgHR ?? 0; }
+            else if (runSort.key === "maxHR") { av = a.maxHR ?? 0; bv = b.maxHR ?? 0; }
+            else if (runSort.key === "elev") { av = a.elev ?? 0; bv = b.elev ?? 0; }
+            else if (runSort.key === "avgCadence") { av = a.avgCadence ?? 0; bv = b.avgCadence ?? 0; }
+            else if (runSort.key === "avgPower") { av = a.avgPower ?? 0; bv = b.avgPower ?? 0; }
+            else if (runSort.key === "calories") { av = a.calories ?? 0; bv = b.calories ?? 0; }
+            else { av = 0; bv = 0; }
+            return runSort.dir === "asc" ? (av > bv ? 1 : -1) : (av < bv ? 1 : -1);
+          });
+
+          const toggleSort = (key) => setRunSort(s => s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "desc" });
+
+          const hrColor = hr => !hr ? C.midGray : hr > 165 ? C.red : hr > 150 ? C.amber : C.green;
+
+          // Drill-in modal
+          if (selectedRun) {
+            const r = selectedRun;
+            const fields = [
+              { label:"Date",               value: r.date },
+              { label:"Type",               value: r.indoor ? "Indoor Run" : "Outdoor Run" },
+              { label:"Time of Day",        value: r.timeOfDay ?? "—" },
+              { label:"Distance",           value: `${kmToMi(r.dist).toFixed(2)} mi (${r.dist.toFixed(2)} km)` },
+              { label:"Duration",           value: r.movingTimeSec ? `${Math.floor(r.movingTimeSec/3600)?Math.floor(r.movingTimeSec/3600)+"h ":""}${Math.floor((r.movingTimeSec%3600)/60)}m ${Math.round(r.movingTimeSec%60)}s` : "—" },
+              { label:"Pace",               value: r.pace ?? "—", unit:"/mi" },
+              { label:"Avg Heart Rate",     value: r.avgHR ? `${Math.round(r.avgHR)} bpm` : "—", color: hrColor(r.avgHR) },
+              { label:"Max Heart Rate",     value: r.maxHR ? `${Math.round(r.maxHR)} bpm` : "—", color: hrColor(r.maxHR) },
+              { label:"Elevation Gain",     value: `${mToFt(r.elev).toLocaleString()} ft (${r.elev.toFixed(0)} m)` },
+              { label:"Avg Cadence",        value: r.avgCadence ? `${Math.round(r.avgCadence)} spm` : "—" },
+              { label:"Avg Power",          value: r.avgPower ? `${r.avgPower} W` : "—" },
+              { label:"Avg Ground Contact", value: r.avgGroundContactTime ? `${r.avgGroundContactTime} ms` : "—" },
+              { label:"Avg Vert Oscillation",value: r.avgVerticalOscillation ? `${r.avgVerticalOscillation} m` : "—" },
+              { label:"Avg Stride Length",  value: r.avgStrideLength ? `${r.avgStrideLength} m` : "—" },
+              { label:"Calories",           value: r.calories ? `${r.calories.toLocaleString()} kcal` : "—" },
+              { label:"Temperature",        value: r.temperature != null ? `${r.temperature}°F` : "—" },
+              { label:"Humidity",           value: r.humidity != null ? `${r.humidity}%` : "—" },
+            ];
+            return (
+              <div>
+                {/* Back button */}
+                <button onClick={() => setSelectedRun(null)} style={{
+                  display:"inline-flex", alignItems:"center", gap:6,
+                  background:"none", border:`1px solid ${C.border}`, borderRadius:6,
+                  padding:"7px 14px", fontSize:13, fontWeight:600, color:C.navy,
+                  cursor:"pointer", fontFamily:F, marginBottom:20,
+                }}>← Back to all runs</button>
+
+                {/* Run header */}
+                <div style={{ background:`linear-gradient(105deg,${C.navy},${C.navyMid})`, borderRadius:12, padding:"22px 28px", marginBottom:20, borderLeft:`4px solid ${C.red}` }}>
+                  <p style={{ color:"rgba(255,255,255,0.6)", fontSize:12, fontWeight:700, letterSpacing:"0.12em", textTransform:"uppercase", margin:"0 0 6px" }}>Run Detail</p>
+                  <p style={{ color:C.white, fontSize:28, fontWeight:900, margin:"0 0 4px", letterSpacing:"-0.02em" }}>{r.date}</p>
+                  <div style={{ display:"flex", flexWrap:"wrap", gap:16 }}>
+                    <span style={{ color:"rgba(255,255,255,0.8)", fontSize:16, fontWeight:700 }}>{kmToMi(r.dist).toFixed(2)} mi</span>
+                    <span style={{ color:"rgba(255,255,255,0.6)", fontSize:15 }}>{r.pace}/mi</span>
+                    {r.avgHR && <span style={{ color:"rgba(255,255,255,0.6)", fontSize:15 }}>{Math.round(r.avgHR)} bpm avg</span>}
+                  </div>
+                </div>
+
+                {/* All fields grid */}
+                <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
+                  <div style={{ display:"grid", gridTemplateColumns: isMob ? "1fr" : "1fr 1fr", gap: "0 32px" }}>
+                    {fields.map((f, i) => (
+                      <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderBottom:`1px solid ${C.light}` }}>
+                        <span style={{ color:C.midGray, fontSize:13 }}>{f.label}</span>
+                        <span style={{ color:f.color || C.darkGray, fontSize:14, fontWeight:600 }}>{f.value}{f.unit ? <span style={{ color:C.midGray, fontWeight:400, marginLeft:2 }}>{f.unit}</span> : null}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Splits if available */}
+                {r.splits && r.splits.length > 0 && (
+                  <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)", marginTop:16 }}>
+                    <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:"0 0 14px" }}>Splits ({r.splits.length})</p>
+                    <div style={{ overflowX:"auto" }}>
+                      <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:F, fontSize:13 }}>
+                        <thead>
+                          <tr style={{ borderBottom:`2px solid ${C.border}` }}>
+                            {["Split","Dist (km)","Time","Avg HR","Max HR"].map(h => (
+                              <th key={h} style={{ textAlign:h==="Split"?"left":"right", padding:"6px 10px", color:C.midGray, fontWeight:600, fontSize:11, letterSpacing:"0.06em", textTransform:"uppercase" }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {r.splits.map((s, i) => (
+                            <tr key={i} style={{ borderBottom:`1px solid ${C.light}`, background:i%2===0?C.white:C.offWhite }}>
+                              <td style={{ padding:"7px 10px", fontWeight:600 }}>{s.split}</td>
+                              <td style={{ textAlign:"right", padding:"7px 10px" }}>{s.distKm?.toFixed(2) ?? "—"}</td>
+                              <td style={{ textAlign:"right", padding:"7px 10px" }}>{s.movingTimeSec ? `${Math.floor(s.movingTimeSec/60)}:${String(Math.round(s.movingTimeSec%60)).padStart(2,"0")}` : "—"}</td>
+                              <td style={{ textAlign:"right", padding:"7px 10px", fontWeight:700, color:hrColor(s.avgHR) }}>{s.avgHR ? `${Math.round(s.avgHR)}` : "—"}</td>
+                              <td style={{ textAlign:"right", padding:"7px 10px", color:hrColor(s.maxHR) }}>{s.maxHR ? `${Math.round(s.maxHR)}` : "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          // Main table view
+          return (
+            <div>
+              {/* Summary strip */}
+              <div style={{ display:"grid", gridTemplateColumns: isMob ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:12, marginBottom:20 }}>
+                {[
+                  { label:"Total Runs",   value:runs.length,             unit:"",    color:C.navy },
+                  { label:"Total Miles",  value:totalMi,                 unit:" mi", color:C.red },
+                  { label:"Avg Distance", value:runs.length ? +( kmToMi(runs.reduce((s,r)=>s+r.dist,0))/runs.length).toFixed(1) : "—", unit:" mi", color:C.navy },
+                  { label:"Avg Pace",     value:avgPaceFmt30,            unit:"/mi", color:C.bofaBlue },
+                ].map(s => (
+                  <div key={s.label} style={{ background:C.white, border:`1px solid ${C.border}`, borderTop:`3px solid ${s.color}`, borderRadius:8, padding:"12px 16px" }}>
+                    <p style={{ color:C.midGray, fontSize:11, fontWeight:700, letterSpacing:"0.09em", textTransform:"uppercase", margin:"0 0 4px" }}>{s.label}</p>
+                    <p style={{ color:s.color, fontSize:22, fontWeight:800, margin:0, lineHeight:1 }}>{s.value}<span style={{ fontSize:12, fontWeight:400, color:C.midGray }}>{s.unit}</span></p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Search + count */}
+              <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:14, flexWrap:"wrap" }}>
+                <input
+                  type="text"
+                  placeholder="Filter by date, type, time of day…"
+                  value={runFilter}
+                  onChange={e => setRunFilter(e.target.value)}
+                  style={{ flex:1, minWidth:180, padding:"8px 12px", border:`1px solid ${C.border}`, borderRadius:6, fontSize:13, fontFamily:F, outline:"none", color:C.darkGray }}
+                />
+                <span style={{ color:C.midGray, fontSize:13, flexShrink:0 }}>{sorted.length} run{sorted.length!==1?"s":""}</span>
+                {runFilter && <button onClick={()=>setRunFilter("")} style={{ background:"none", border:`1px solid ${C.border}`, borderRadius:5, padding:"6px 10px", fontSize:12, cursor:"pointer", color:C.midGray, fontFamily:F }}>Clear</button>}
+              </div>
+
+              {/* Table */}
+              <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, overflow:"hidden", boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
+                <div style={{ overflowX:"auto" }}>
+                  <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:F, fontSize:13 }}>
+                    <thead>
+                      <tr style={{ background:C.navy }}>
+                        {COL_DEFS.map(col => (
+                          <th key={col.key}
+                            onClick={() => toggleSort(col.key)}
+                            style={{
+                              textAlign: col.align, padding:"10px 12px",
+                              color:"rgba(255,255,255,0.85)", fontWeight:700, fontSize:11,
+                              letterSpacing:"0.07em", textTransform:"uppercase",
+                              cursor:"pointer", userSelect:"none", whiteSpace:"nowrap",
+                            }}>
+                            {col.label}
+                            {runSort.key===col.key ? (runSort.dir==="asc"?" ↑":" ↓") : <span style={{opacity:0.3}}> ↕</span>}
+                          </th>
+                        ))}
+                        <th style={{ padding:"10px 12px", color:"rgba(255,255,255,0.5)", fontSize:11, fontWeight:600, textTransform:"uppercase", whiteSpace:"nowrap" }}>Detail</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sorted.map((r, i) => {
+                        const mi = kmToMi(r.dist).toFixed(2);
+                        const isLong = kmToMi(r.dist) >= 8;
+                        return (
+                          <tr key={r.id || r.date+i}
+                            style={{ borderBottom:`1px solid ${C.light}`, background:i%2===0?C.white:C.offWhite, transition:"background 0.1s" }}
+                            onMouseEnter={e=>e.currentTarget.style.background="#eef2ff"}
+                            onMouseLeave={e=>e.currentTarget.style.background=i%2===0?C.white:C.offWhite}
+                          >
+                            <td style={{ padding:"14px 16px", fontWeight:700, whiteSpace:"nowrap", fontSize:15 }}>
+                              {r.date}
+                              {isLong && <span style={{ marginLeft:6, fontSize:11, fontWeight:700, color:C.red, background:C.red+"15", borderRadius:3, padding:"2px 5px" }}>LONG</span>}
+                              {r.indoor && <span style={{ marginLeft:4, fontSize:11, color:C.bofaBlue, background:C.bofaBlue+"15", borderRadius:3, padding:"2px 5px" }}>🏠</span>}
+                            </td>
+                            <td style={{ textAlign:"right", padding:"14px 16px", fontWeight:800, fontSize:16, color:kmToMi(r.dist)>=10?C.red:kmToMi(r.dist)>=8?C.navy:C.darkGray }}>{mi}</td>
+                            <td style={{ textAlign:"right", padding:"14px 16px", fontFamily:"monospace", fontSize:15, fontWeight:600 }}>{r.pace ?? "—"}</td>
+                            <td style={{ textAlign:"right", padding:"14px 16px", color:C.midGray, fontSize:14 }}>
+                              {r.movingTimeSec ? `${Math.floor(r.movingTimeSec/3600)?Math.floor(r.movingTimeSec/3600)+"h ":""}${Math.floor((r.movingTimeSec%3600)/60)}m` : "—"}
+                            </td>
+                            <td style={{ textAlign:"right", padding:"14px 16px", fontWeight:700, fontSize:15, color:hrColor(r.avgHR) }}>{r.avgHR ? Math.round(r.avgHR) : "—"}</td>
+                            <td style={{ textAlign:"right", padding:"14px 16px", color:C.midGray, fontSize:14 }}>{r.avgCadence ? Math.round(r.avgCadence) : "—"}</td>
+                            <td style={{ padding:"14px 16px", color:C.midGray, fontSize:13, whiteSpace:"nowrap" }}>{r.timeOfDay ?? "—"}</td>
+                            <td style={{ padding:"14px 16px" }}>
+                              <button onClick={() => setSelectedRun(r)} style={{
+                                background:C.navy, color:C.white, border:"none", borderRadius:6,
+                                padding:"7px 14px", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:F,
+                              }}>View</button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {sorted.length === 0 && (
+                  <p style={{ color:C.midGray, fontSize:14, textAlign:"center", padding:"32px 0" }}>No runs match your filter.</p>
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
       </div>
 
