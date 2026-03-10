@@ -460,7 +460,7 @@ function getTodayQuote() {
 }
 
 /* ─── Weekly Summary AI ──────────────────────────────────── */
-const WEEKLY_LS_KEY = "weeklySummaryCache_v3";
+const WEEKLY_LS_KEY = "weeklySummaryCache_v4";
 function loadWeeklyCache() { try { return JSON.parse(localStorage.getItem(WEEKLY_LS_KEY)||"{}"); } catch { return {}; } }
 function saveWeeklyCache(c) { try { localStorage.setItem(WEEKLY_LS_KEY,JSON.stringify(c)); } catch {} }
 
@@ -781,7 +781,7 @@ function summarizeTrainingData(runs, computed) {
         moderate: "152–165 bpm (Z3, grey zone — avoid accumulating here)",
         hard: "165+ bpm (Z4–Z5, true quality work)",
       },
-      raceGoal: "Finish Chicago Marathon under 4:14:52. Current prediction vs target is always relevant.",
+      raceGoal: "Finish the Chicago Marathon. Season goal: build the aerobic base so race day feels manageable.",
       seasonGoal: "Build aerobic base across 32-week Chicago build. Long run to 20–22 mi peak.",
     },
   };
@@ -803,7 +803,7 @@ function hashSummary(summary) {
 }
 
 /* ─── CoachReport Component ──────────────────────────────────────────────── */
-const LS_KEY = "coachReportCache_v2";
+const LS_KEY = "coachReportCache_v4";
 
 function loadFromStorage() {
   try {
@@ -836,7 +836,7 @@ function CoachReport({ summary }) {
 
     const phaseContext = phasePrompts[summary.phase] || phasePrompts["base-building"];
 
-    const systemPrompt = `You are a marathon coach analyzing John's training data in the direct, evidence-based style of Steve Magness. Your job is to produce insights — not summaries. John can read his own data. Tell him what it means.\n\nMAGNESS PHILOSOPHY (apply to every piece of advice):\n1. Stress + Rest = Adaptation. Easy days consolidate hard work. Most runners under-recover.\n2. Polarize ruthlessly. 80% easy, 20% hard. The grey zone (152–165 bpm) stalls adaptation — too hard to recover from, too easy to drive improvement.\n3. Aerobic infrastructure first. Mitochondrial density, fat oxidation, cardiac stroke volume are built at low intensity. The aerobic base is the ceiling for everything else.\n4. Progressive overload. ACWR above 1.3 = caution. Above 1.5 = back off. 3 weeks build, 1 week recovery.\n5. Specificity late. Marathon-specific work belongs in the final 10–12 weeks. Right now: build the engine.\n6. Long runs are the cornerstone. They must be easy. Running them too hard is the most common marathon prep mistake.\n\nJOHN'S CONTEXT (non-negotiable):\n- Name: John. Use "John" throughout — never "the athlete".\n- Newer runner, first structured marathon training block. Base is developing — this is the plan, not a problem.\n- Easy runs sit naturally in the 140s bpm. This is John's aerobic baseline. Do NOT flag 140s HR as too hard.\n- HR zones (John-specific): easy <152 bpm · moderate 152–165 · hard 165+\n- Race goal: finish Chicago Marathon under 4:14:52. Quantify the gap to this target when data allows.\n- Season goal: by race week, what feels hard now should feel easy — that's the aerobic adaptation.\n\nMETRIC THRESHOLDS:\n- Pace fade: ≤20s = even; ≤60s = acceptable drift; >60s = started too fast\n- HR drift: <8 bpm = strong endurance; 8–16 = moderate; >16 = cardiovascular strain\n- Split σ: <20s = excellent; 20–40s = moderate; >40s = erratic pacing\n- ACWR: 0.8–1.3 = safe; above 1.3 = elevated risk\n- intensityDistribution.easyPct: measured from mile-level Strava splits where available (most accurate). Target ≥80%.\n\nTODAY: ${summary.today}\nPHASE: ${summary.phase.toUpperCase()} — ${phaseContext}\nRACE: ${summary.raceDate} | ${summary.weeksToRace} weeks out\nMARATHON TARGET: sub-4:14:52 | Prediction: ${summary.criticalPaces?.marathonPrediction ?? "unknown"}\n\nOUTPUT — respond ONLY with this exact JSON, no markdown:\n{\n  "concerns": [\n    { "level": "HIGH|MEDIUM", "title": "concise title", "body": "2-3 sentences. Lead with the insight (what the pattern reveals about John's physiology or risk), then the mechanism, then a specific fix with numbers.", "stillApplicable": true }\n  ],\n  "guidance": [\n    { "n": "01", "title": "action-oriented title", "body": "2-3 sentences max. One core insight grounded in John's actual data. What it means, why it matters, what to do. No filler." }\n  ],\n  "thisWeekAction": "One concrete workout prescription for John this week. Include day, distance, HR ceiling or pace target, and why it addresses the most pressing pattern in the data. 2 sentences.",\n  "weekPlan": [\n    { "day": "Mon", "type": "rest|easy|moderate|long|workout", "description": "specific prescription: distance, HR ceiling, effort cue", "rationale": "one sentence: why this day/effort given John's patterns" }\n  ],\n  \"generatedAt\": \"${new Date().toISOString()}\"\n}\n\nRules: HIGH concerns first. Exactly 3 guidance items. weekPlan must cover all 7 days (Mon–Sun). Use John's habitual active days and rest days from trainingPatternsByDay to anchor the plan — don't prescribe runs on days he never runs. thisWeekAction must reference actual numbers from John's data.`;
+    const systemPrompt = `You are a marathon coach analyzing John's training data in the direct, evidence-based style of Steve Magness. Your job is to produce insights — not summaries. John can read his own data. Tell him what it means.\n\nMAGNESS PHILOSOPHY (apply to every piece of advice):\n1. Stress + Rest = Adaptation. Easy days consolidate hard work. Most runners under-recover.\n2. Polarize ruthlessly. 80% easy, 20% hard. The grey zone (152–165 bpm) stalls adaptation — too hard to recover from, too easy to drive improvement.\n3. Aerobic infrastructure first. Mitochondrial density, fat oxidation, cardiac stroke volume are built at low intensity. The aerobic base is the ceiling for everything else.\n4. Progressive overload. ACWR above 1.3 = caution. Above 1.5 = back off. 3 weeks build, 1 week recovery.\n5. Specificity late. Marathon-specific work belongs in the final 10–12 weeks. Right now: build the engine.\n6. Long runs are the cornerstone. They must be easy. Running them too hard is the most common marathon prep mistake.\n\nJOHN'S CONTEXT (non-negotiable):\n- Name: John. Use "John" throughout — never "the athlete".\n- Newer runner, first structured marathon training block. Base is developing — this is the plan, not a problem.\n- Easy runs sit naturally in the 140s bpm. This is John's aerobic baseline. Do NOT flag 140s HR as too hard.\n- HR zones (John-specific): easy <152 bpm · moderate 152–165 · hard 165+\n- Race goal: finish the Chicago Marathon. Season goal: by race week, what feels hard now should feel easy.\n\nMETRIC THRESHOLDS:\n- Pace fade: ≤20s = even; ≤60s = acceptable drift; >60s = started too fast\n- HR drift: <8 bpm = strong endurance; 8–16 = moderate; >16 = cardiovascular strain\n- Split σ: <20s = excellent; 20–40s = moderate; >40s = erratic pacing\n- ACWR: 0.8–1.3 = safe; above 1.3 = elevated risk\n- intensityDistribution.easyPct: measured from mile-level Strava splits where available (most accurate). Target ≥80%.\n\nPHASE WEEKLY MILEAGE TARGETS (use to set weekPlan total miles):\n- base-building: 35-45 mi/week. Protect the base. No quality work.\n- aerobic-development: 35–45 mi/week. Long run progression is priority. One tempo only if easy% is solid.\n- race-specific: 45–55 mi/week, just past peak. Marathon-pace work in long runs.\n- taper: cut 20–30% week-over-week. Maintain intensity, slash volume.\n\nTODAY: ${summary.today}\nPHASE: ${summary.phase.toUpperCase()} — ${phaseContext}\nRACE: ${summary.raceDate} | ${summary.weeksToRace} weeks out\nCURRENT CHRONIC LOAD: ${summary.acwr?.chronic ?? "unknown"} mi/week\n\nOUTPUT — respond ONLY with this exact JSON, no markdown:\n{\n  "concerns": [\n    { "level": "HIGH|MEDIUM", "title": "concise title", "body": "2-3 sentences. Lead with the insight (what the pattern reveals about John's physiology or risk), then the mechanism, then a specific fix with numbers.", "stillApplicable": true }\n  ],\n  "guidance": [\n    { "n": "01", "title": "action-oriented title", "body": "2-3 sentences max. One core insight grounded in John's actual data. What it means, why it matters, what to do. No filler." }\n  ],\n  "weekSummary": { "targetMiles": 32, "rationale": "one sentence explaining total mileage target relative to phase and current chronic load" },\n  "weekPlan": [\n    { "day": "Mon", "type": "rest|easy|moderate|long|workout|cross", "description": "specific prescription: distance + HR ceiling for runs, or cross-training activity for cross days, or simply Rest for rest days", "rationale": "one sentence: why this day/effort given John's patterns and phase" }\n  ],\n  \"generatedAt\": \"${new Date().toISOString()}\"\n}\n\nRules:\n- HIGH concerns first. Exactly 3 guidance items.\n- weekPlan MUST cover all 7 days (Mon–Sun).\n- weekPlan MUST include at least 1 full rest day and may include 1 cross-training day. Do not schedule runs 7 days straight.\n- Anchor run days to John's habitual active days from trainingPatternsByDay. Place rest/cross on his historically low-activity days.\n- weekPlan run miles must sum to approximately weekSummary.targetMiles.\n- targetMiles must be consistent with the phase target range above AND John's current chronic load — do not prescribe a week that would spike ACWR above 1.3.\n- generatedAt must be today's ISO date.`;
 
     const lrq = summary.longRunQualityTrend;
     const lrTrendSummary = lrq
@@ -852,7 +852,7 @@ function CoachReport({ summary }) {
     const patternStr = habitual
       ? `John's habitual training days: ${habitual.activeDays.join(", ")} | Rest days: ${habitual.restDays.join(", ")} | High-mileage days: ${habitual.highMileageDays.join(", ")}`
       : "";
-    const userPrompt = `JOHN'S TRAINING DATA — generate insights, not summaries. John can read his own numbers. Tell him what they mean.\n\nKEY SIGNALS:\n- Phase: ${summary.phase} | ${summary.weeksToRace} weeks to Chicago\n- ACWR: ${summary.acwr?.ratio ?? "unknown"} (${summary.acwr?.zone ?? "n/a"}) | acute ${summary.acwr?.acute ?? "?"} mi / chronic ${summary.acwr?.chronic ?? "?"} mi\n- This week: ${summary.thisWeek.miles} mi, ${summary.thisWeek.runs} runs | easy ${summary.thisWeek.easyPct}% / mod ${summary.thisWeek.moderatePct}% / hard ${summary.thisWeek.hardPct}%\n- ${intensityDistStr}\n- ${intensityStr}\n- HR trend: ${summary.hrTrendOverSeason} | Monotony: ${summary.trainingMonotony ?? "n/a"} | Aerobic efficiency: ${summary.aerobicEfficiencyTrend}\n- ${lrTrendSummary}\n- Longest run: ${summary.longestRunToDate ?? "n/a"} mi | ${summary.longRunCount} total long runs\n- Marathon prediction: ${summary.criticalPaces?.marathonPrediction ?? "unknown"} vs target 4:14:52 | Best mile: ${summary.criticalPaces?.bestMilePace ?? "n/a"}\n- ${patternStr}\n\nFULL DATA:\n${JSON.stringify(summary, null, 2)}\n\nINSIGHT RULES:\n- Today is ${summary.today}. Exact dates only.\n- Use "John" throughout — never "the athlete".\n- intensityDistribution.easyPct is the most accurate easy% figure (mile-split based). Use it, not thisWeek values, when discussing overall intensity balance.\n- Every concern and guidance item must cite specific numbers.\n- Long run quality trends (fade/drift/sigma direction) signal aerobic development — use them.\n- Quantify the gap between marathon prediction and 4:14:52 target.\n- weekPlan must use John's habitual days (trainingPatternsByDay) — don't prescribe runs on days he consistently doesn't run.\n- generatedAt must be today's ISO date.`;
+    const userPrompt = `JOHN'S TRAINING DATA — generate insights, not summaries. John can read his own numbers. Tell him what they mean.\n\nKEY SIGNALS:\n- Phase: ${summary.phase} | ${summary.weeksToRace} weeks to Chicago\n- ACWR: ${summary.acwr?.ratio ?? "unknown"} (${summary.acwr?.zone ?? "n/a"}) | acute ${summary.acwr?.acute ?? "?"} mi / chronic ${summary.acwr?.chronic ?? "?"} mi\n- This week: ${summary.thisWeek.miles} mi, ${summary.thisWeek.runs} runs | easy ${summary.thisWeek.easyPct}% / mod ${summary.thisWeek.moderatePct}% / hard ${summary.thisWeek.hardPct}%\n- ${intensityDistStr}\n- ${intensityStr}\n- HR trend: ${summary.hrTrendOverSeason} | Monotony: ${summary.trainingMonotony ?? "n/a"} | Aerobic efficiency: ${summary.aerobicEfficiencyTrend}\n- ${lrTrendSummary}\n- Longest run: ${summary.longestRunToDate ?? "n/a"} mi | ${summary.longRunCount} total long runs\n- Best mile: ${summary.criticalPaces?.bestMilePace ?? "n/a"} | Marathon prediction: ${summary.criticalPaces?.marathonPrediction ?? "unknown"}\n- ${patternStr}\n\nFULL DATA:\n${JSON.stringify(summary, null, 2)}\n\nINSIGHT RULES:\n- Today is ${summary.today}. Exact dates only.\n- Use "John" throughout — never "the athlete".\n- intensityDistribution.easyPct is the most accurate easy% figure (mile-split based). Use it when discussing overall intensity balance.\n- Every concern and guidance item must cite specific numbers.\n- Long run quality trends (fade/drift/sigma direction) signal aerobic development — use them.\n- weekPlan total miles must match weekSummary.targetMiles. Both must be grounded in the phase target range and John's current chronic load (${summary.acwr?.chronic ?? "unknown"} mi/week). They should explicitly speak to each other.\n- weekPlan MUST have at least 1 rest day. No 7-day run streaks.\n- generatedAt must be today's ISO date.`;
 
     const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY;
 
@@ -867,7 +867,7 @@ function CoachReport({ summary }) {
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
-        max_tokens: 3200,
+        max_tokens: 3600,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
@@ -884,23 +884,22 @@ function CoachReport({ summary }) {
           parsed = JSON.parse(clean);
         } catch (parseErr) {
           console.warn("Initial parse failed, attempting salvage:", parseErr.message);
-          const fallbackJson = {
-            concerns: [],
-            guidance: [],
-            thisWeekAction: "Focus on keeping all runs easy this week — heart rate under 150 bpm. Log how each run feels vs. the number.",
-            generatedAt: new Date().toISOString()
+          // Try to extract a valid JSON object by finding the last complete field
+          let salvaged = false;
+          // Strategy 1: truncate at last complete top-level value
+          const tryClose = (s) => {
+            for (let trim = s.length; trim > 100; trim--) {
+              const attempt = s.slice(0, trim).replace(/,\s*$/, '') + '\n,"generatedAt":"' + new Date().toISOString() + '"}';
+              try { const p = JSON.parse(attempt); salvaged = true; return p; } catch {}
+            }
+            return null;
           };
-          const salvageStr = clean
-            .replace(/,\s*"[^"]*"\s*:\s*[^,}\]]*$/, "")
-            .replace(/,\s*$/, "") +
-            ',\n  "thisWeekAction": ' + JSON.stringify(fallbackJson.thisWeekAction) + ',\n  "generatedAt": "' + new Date().toISOString() + '"\n}';
-          try {
-            parsed = JSON.parse(salvageStr);
-            console.warn("Salvaged truncated response successfully");
-          } catch {
-            throw new Error("Response was truncated and could not be recovered. This usually means the model ran out of tokens — try refreshing.");
-          }
+          parsed = tryClose(clean);
+          if (!parsed) throw new Error("Response was truncated and could not be recovered. Try refreshing.");
+          if (salvaged) console.warn("Salvaged truncated response");
         }
+        // Ensure weekPlan is always an array (may be missing if response was truncated)
+        if (!Array.isArray(parsed.weekPlan)) parsed.weekPlan = [];
         const entry = { data: parsed, timestamp: new Date().toISOString() };
         setCache(prev => {
           const next = { ...prev, [hash]: entry };
@@ -1046,54 +1045,64 @@ function CoachReport({ summary }) {
         ))}
       </div>
 
-      {data.thisWeekAction && (
-        <div style={{ background: `linear-gradient(135deg,${C.navy}06,${C.navy}02)`, border: `1px solid ${C.navy}25`, borderLeft: `5px solid ${C.navy}`, borderRadius: 8, padding: "20px 22px", marginBottom: 24 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-            <span style={{ fontSize: 22 }}>🎯</span>
-            <p style={{ color: C.navy, fontWeight: 800, fontSize: 21, margin: 0, letterSpacing: "-0.01em", flex: 1 }}>This Week: One Thing to Try</p>
-            <span style={{ color: C.midGray, fontSize: 13 }}>{metaLabel}</span>
-          </div>
-          <p style={{ color: "#2a2a2a", fontSize: 16, lineHeight: 1.85, margin: 0 }}>{data.thisWeekAction}</p>
-        </div>
-      )}
-
       {data.weekPlan && data.weekPlan.length > 0 && (() => {
         const typeColors = {
-          rest:    { bg: "#f5f5f5", border: C.border, label: "Rest",    dot: C.midGray },
-          easy:    { bg: C.green+"0d", border: C.green+"40", label: "Easy",    dot: C.green },
-          moderate:{ bg: C.amber+"0d", border: C.amber+"40", label: "Moderate", dot: C.amber },
-          long:    { bg: C.bofaBlue+"0d", border: C.bofaBlue+"40", label: "Long Run", dot: C.bofaBlue },
-          workout: { bg: C.red+"0d", border: C.red+"40", label: "Workout", dot: C.red },
+          rest:    { bg: "#f5f5f5",           border: C.border,        label: "Rest",       dot: C.midGray },
+          easy:    { bg: C.green+"12",         border: C.green+"50",    label: "Easy",       dot: C.green },
+          moderate:{ bg: C.amber+"12",         border: C.amber+"50",    label: "Moderate",   dot: C.amber },
+          long:    { bg: C.bofaBlue+"12",      border: C.bofaBlue+"50", label: "Long Run",   dot: C.bofaBlue },
+          workout: { bg: C.red+"12",           border: C.red+"50",      label: "Workout",    dot: C.red },
+          cross:   { bg: "#f0f4ff",            border: "#93c5fd",       label: "Cross Train",dot: "#6366f1" },
         };
+        const ws = data.weekSummary;
         return (
-          <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "20px 22px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-              <span style={{ fontSize: 20 }}>📅</span>
-              <p style={{ color: C.navy, fontWeight: 800, fontSize: 20, margin: 0, letterSpacing: "-0.01em" }}>Suggested Week Plan</p>
+          <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+            {/* Header */}
+            <div style={{ background: C.navy, padding: "16px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 22 }}>📅</span>
+                <p style={{ color: "#fff", fontWeight: 800, fontSize: 20, margin: 0, letterSpacing: "-0.01em" }}>Suggested Week Plan</p>
+              </div>
+              {ws && (
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span style={{ background: C.green, color: "#fff", fontWeight: 800, fontSize: 15, borderRadius: 6, padding: "4px 14px" }}>
+                    ~{ws.targetMiles} mi target
+                  </span>
+                </div>
+              )}
             </div>
-            <p style={{ color: C.midGray, fontSize: 13, margin: "0 0 16px" }}>Built from John's training patterns and current data. Adjust to how you feel — HR ceiling beats pace target.</p>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 8 }}>
-              {data.weekPlan.map((d, i) => {
-                const s = typeColors[d.type] || typeColors.easy;
-                return (
-                  <div key={i} style={{ background: s.bg, border: `1px solid ${s.border}`, borderRadius: 8, padding: "10px 8px", display: "flex", flexDirection: "column", gap: 4, minHeight: 110 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
-                      <span style={{ color: C.navy, fontWeight: 800, fontSize: 13 }}>{d.day}</span>
-                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: s.dot, flexShrink: 0 }} />
+            {ws?.rationale && (
+              <div style={{ background: C.navy+"12", borderBottom: `1px solid ${C.border}`, padding: "10px 22px" }}>
+                <p style={{ color: C.darkGray, fontSize: 13, margin: 0, lineHeight: 1.5 }}>
+                  <strong>Why this mileage:</strong> {ws.rationale}
+                </p>
+              </div>
+            )}
+            {/* Day cards */}
+            <div style={{ padding: "18px 22px" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 10 }}>
+                {data.weekPlan.map((d, i) => {
+                  const s = typeColors[d.type] || typeColors.easy;
+                  return (
+                    <div key={i} style={{ background: s.bg, border: `1px solid ${s.border}`, borderRadius: 10, padding: "12px 10px", display: "flex", flexDirection: "column", gap: 6, minHeight: 150 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ color: C.navy, fontWeight: 800, fontSize: 14 }}>{d.day}</span>
+                        <span style={{ width: 9, height: 9, borderRadius: "50%", background: s.dot, flexShrink: 0 }} />
+                      </div>
+                      <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase", color: s.dot }}>{s.label}</span>
+                      <p style={{ color: C.darkGray, fontSize: 12, lineHeight: 1.5, margin: 0, flex: 1 }}>{d.description}</p>
+                      {d.rationale && <p style={{ color: C.midGray, fontSize: 10, margin: 0, lineHeight: 1.4, fontStyle: "italic", borderTop: `1px solid ${s.border}`, paddingTop: 6 }}>{d.rationale}</p>}
                     </div>
-                    <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", color: s.dot }}>{s.label}</span>
-                    <p style={{ color: C.darkGray, fontSize: 11, lineHeight: 1.4, margin: 0, flex: 1 }}>{d.description}</p>
-                    {d.rationale && <p style={{ color: C.midGray, fontSize: 10, margin: 0, lineHeight: 1.3, fontStyle: "italic" }}>{d.rationale}</p>}
-                  </div>
-                );
-              })}
-            </div>
-            <div style={{ display: "flex", gap: 14, marginTop: 12, flexWrap: "wrap" }}>
-              {Object.entries(typeColors).map(([k, v]) => (
-                <span key={k} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: C.midGray }}>
-                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: v.dot, display: "inline-block" }} />{v.label}
-                </span>
-              ))}
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", gap: 14, marginTop: 14, flexWrap: "wrap" }}>
+                {Object.entries(typeColors).map(([k, v]) => (
+                  <span key={k} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: C.midGray }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: v.dot, display: "inline-block" }} />{v.label}
+                  </span>
+                ))}
+              </div>
             </div>
           </div>
         );
@@ -4143,7 +4152,7 @@ export default function Dashboard() {
                 Last updated: {new Date(lastUpdated).toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric",hour:"2-digit",minute:"2-digit"})}
               </p>
             )}
-            <p style={{ color:C.midGray, fontSize:13, margin:0 }}>© 2026 Bank of America Corporation · October 11, 2026</p>
+            <p style={{ color:C.midGray, fontSize:13, margin:0 }}>© 2026 Wells Fargo Corporation · October 11, 2026</p>
           </div>
         </div>
       </div>
