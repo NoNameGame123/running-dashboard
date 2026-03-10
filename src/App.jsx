@@ -241,7 +241,8 @@ function createMileSplits(w) {
         paceSec:      (ms.distance_m && movingSec > 0)
                         ? movingSec / (ms.distance_m / 1609.344)
                         : null,
-        avgHR:    hr.avg  ?? null,
+        // Prefer Strava avg_hr (top-level), fall back to apple_health.HeartRate.avg
+        avgHR:    ms.avg_hr  != null ? ms.avg_hr  : (hr.avg  ?? null),
         maxHR:    hr.max  ?? null,
         minHR:    hr.min  ?? null,
         avgPower: pwr.avg ?? null,
@@ -561,15 +562,43 @@ function summarizeTrainingData(runs, computed) {
     ? "race-specific"
     : "taper";
 
-  const easyPct150 = (() => {
-    let easyMin = 0, totalMin = 0;
-    allRuns.filter(r => r.avgHR).forEach(r => {
-      const min = r.movingTimeSec ? r.movingTimeSec / 60 : (r.paceSec && r.dist ? r.dist * r.paceSec / 60 : 0);
-      totalMin += min;
-      if (r.avgHR < 150) easyMin += min;
-    });
-    return totalMin > 0 ? +(easyMin / totalMin * 100).toFixed(1) : null;
-  })();
+    const easyPct150 = (() => {
+      let easyMin = 0, totalMin = 0;
+      let splitRunsUsed = 0;
+      let fallbackRunsUsed = 0;
+    
+      allRuns.forEach(r => {
+        const splits = r.splits || [];
+        const hasGoodSplits = splits.length >= 2 && splits.some(s => s.avgHR && s.movingTimeSec);
+    
+        if (hasGoodSplits) {
+          splitRunsUsed++;
+          splits.forEach(s => {
+            if (s.avgHR && s.movingTimeSec) {
+              totalMin += s.movingTimeSec / 60;
+              if (s.avgHR < 150) easyMin += s.movingTimeSec / 60;
+            }
+          });
+        } else if (r.avgHR != null) {
+          fallbackRunsUsed++;
+          const min = r.movingTimeSec ? r.movingTimeSec / 60 : (r.paceSec && r.dist ? r.dist * r.paceSec / 60 : 0);
+          totalMin += min;
+          if (r.avgHR < 150) easyMin += min;
+        }
+      });
+    
+      const pct = totalMin > 0 ? +(easyMin / totalMin * 100).toFixed(1) : null;
+    
+      // ── DEBUG OUTPUT ──
+      console.log("=== EASY PCT150 SPLIT DEBUG ===");
+      console.log(`Total runs: ${allRuns.length}`);
+      console.log(`✅ Using mile-level HR: ${splitRunsUsed} runs`);
+      console.log(`⚠️  Using whole-run fallback: ${fallbackRunsUsed} runs`);
+      console.log(`NEW Easy % for Coach's Report: ${pct}%`);
+      console.log("=================================");
+    
+      return pct;
+    })();
 
   const last4Weeks = weekly ? weekly.slice(-4).map(w => ({ week: w.label, miles: w.miles, runs: w.runs })) : [];
 
@@ -967,6 +996,11 @@ export default function Dashboard() {
   const [runFilter, setRunFilter]     = useState("");
   const [debugLog, setDebugLog]     = useState([]);
   const [showDebug, setShowDebug]   = useState(false);
+  // ── Global HR color helper (used by Long Run Splits + Raw Stats) ──
+  const hrColor = (hr) => {
+    if (!hr) return C.midGray;
+    return hr > 165 ? C.red : hr > 150 ? C.amber : C.green;
+  };
 
   const addDebug = (msg, type="info") => {
     const ts = new Date().toISOString().slice(11,23);
@@ -1227,15 +1261,39 @@ export default function Dashboard() {
   const longRunMiles = 8;
   const longRuns = useMemo(() => runsWithDuration
     .filter(r => kmToMi(r.dist) >= longRunMiles || r.durationMin >= 90)
-    .map(r => ({
-      date: r.date,
-      miles: +kmToMi(r.dist).toFixed(2),
-      durationMin: +r.durationMin.toFixed(0),
-      paceSec: r.paceSec,
-      paceLabel: paceSecToLabel(r.paceSec),
-      avgHR: r.avgHR,
-      isEasy: r.avgHR != null && r.avgHR < 150,
-    }))
+    .map(r => {
+      // Compute split-derived analytics
+      const fullSplits = (r.splits || []).filter(s => s.distMiles != null && s.distMiles >= 0.85 && s.paceSec);
+      const splitPaces = fullSplits.map(s => s.paceSec);
+      const firstMilePace = splitPaces[0] ?? null;
+      const lastMilePace = splitPaces[splitPaces.length - 1] ?? null;
+      // Positive fade = slowed down (positive = sec/mi added = worse); negative = negative split
+      const paceFadeSec = (firstMilePace != null && lastMilePace != null) ? +(lastMilePace - firstMilePace).toFixed(1) : null;
+      // Split consistency: std deviation of split paces
+      const splitConsistency = splitPaces.length >= 3 ? (() => {
+        const mean = splitPaces.reduce((a,b) => a+b, 0) / splitPaces.length;
+        const std = Math.sqrt(splitPaces.reduce((a,b) => a + Math.pow(b-mean,2), 0) / splitPaces.length);
+        return +std.toFixed(1);
+      })() : null;
+      // HR drift: last mile HR - first mile HR (via splits)
+      const splitHRs = (r.splits || []).filter(s => s.distMiles != null && s.distMiles >= 0.85 && s.avgHR);
+      const hrDrift = splitHRs.length >= 2 ? +(splitHRs[splitHRs.length-1].avgHR - splitHRs[0].avgHR).toFixed(1) : null;
+      return {
+        id: r.id,
+        date: r.date,
+        miles: +kmToMi(r.dist).toFixed(2),
+        durationMin: +r.durationMin.toFixed(0),
+        paceSec: r.paceSec,
+        paceLabel: paceSecToLabel(r.paceSec),
+        avgHR: r.avgHR,
+        isEasy: r.avgHR != null && r.avgHR < 150,
+        splits: r.splits || [],
+        paceFadeSec,
+        splitConsistency,
+        hrDrift,
+        stravaId: r.stravaId,
+      };
+    })
     .sort((a,b) => a.date.localeCompare(b.date)), [runsWithDuration]);
   
   const longRunTrend = longRuns.length >= 2 ? linReg(longRuns.map((r,i) => ({ x: i, y: r.miles }))) : null;
@@ -1336,14 +1394,30 @@ export default function Dashboard() {
       { id: "medium", label: "Medium (150–165 bpm)",   min: 150, max: 165, color: C.amber },
       { id: "hard",   label: "Hard (>165 bpm)",        min: 165, max: 400, color: C.red },
     ];
+  
     const mins = buckets.map(b => ({ ...b, minutes: 0 }));
-    runsWithDuration.filter(r => r.avgHR != null).forEach(r => {
-      const bucket = mins.find(b => r.avgHR >= b.min && r.avgHR < b.max);
-      if (bucket) bucket.minutes += r.durationMin;
+  
+    runsWithDuration.forEach(r => {
+      const splits = r.splits || [];
+      const hasGoodSplits = splits.length >= 2 && splits.some(s => s.avgHR && s.movingTimeSec);
+  
+      if (hasGoodSplits) {
+        splits.forEach(s => {
+          if (s.avgHR && s.movingTimeSec) {
+            const bucket = mins.find(b => s.avgHR >= b.min && s.avgHR < b.max);
+            if (bucket) bucket.minutes += s.movingTimeSec / 60;
+          }
+        });
+      } else if (r.avgHR != null) {
+        const bucket = mins.find(b => r.avgHR >= b.min && r.avgHR < b.max);
+        if (bucket) bucket.minutes += r.durationMin;
+      }
     });
-    const total = mins.reduce((s,b) => s + b.minutes, 0) || 1;
+  
+    const total = mins.reduce((s, b) => s + b.minutes, 0) || 1;
     return mins.map(b => ({
       ...b,
+      minutes: +b.minutes.toFixed(0),
       pct: +(100 * b.minutes / total).toFixed(1),
     }));
   }, [runsWithDuration]);
@@ -1354,23 +1428,41 @@ export default function Dashboard() {
       { id: "medium", label: "Moderate", min: 150, max: 165, color: C.amber },
       { id: "hard",   label: "Hard",     min: 165, max: 400, color: C.red },
     ];
+  
     const calc = (runsArr) => {
       const mins = buckets.map(b => ({ ...b, minutes: 0 }));
+  
       runsArr.forEach(r => {
-        if (r.avgHR != null) {
+        const splits = r.splits || [];
+        const hasGoodSplits = splits.length >= 2 && splits.some(s => s.avgHR && s.movingTimeSec);
+  
+        if (hasGoodSplits) {
+          splits.forEach(s => {
+            if (s.avgHR && s.movingTimeSec) {
+              const bucket = mins.find(b => s.avgHR >= b.min && s.avgHR < b.max);
+              if (bucket) bucket.minutes += s.movingTimeSec / 60;
+            }
+          });
+        } else if (r.avgHR != null) {
           const durationMin = r.movingTimeSec
             ? r.movingTimeSec / 60
-            : (r.dist && r.paceSec ? (r.dist * r.paceSec) / 60 : null);
-          if (durationMin == null) return;
+            : (r.dist && r.paceSec ? (r.dist * r.paceSec) / 60 : 0);
           const bucket = mins.find(b => r.avgHR >= b.min && r.avgHR < b.max);
           if (bucket) bucket.minutes += durationMin;
         }
       });
+  
       const total = mins.reduce((s, b) => s + b.minutes, 0) || 1;
-      return mins.map(b => ({ ...b, pct: +(100 * b.minutes / total).toFixed(1), minutes: +b.minutes.toFixed(0) }));
+      return mins.map(b => ({
+        ...b,
+        minutes: +b.minutes.toFixed(0),
+        pct: +(100 * b.minutes / total).toFixed(1),
+      }));
     };
+  
     const prevMonDate = prevCompletedWeek?.monDate;
     const prevWeekRuns = prevMonDate ? runs.filter(r => getMondayOf(r.date) === prevMonDate) : [];
+  
     return {
       current: calc(thisWeekRuns),
       prior:   calc(prevWeekRuns),
@@ -1383,6 +1475,24 @@ export default function Dashboard() {
     const sp = arr => [...arr].sort((a,b)=>a.paceSec-b.paceSec);
     const best10K   = sp(recent.filter(r=>r.miles>=5.5&&r.miles<=7))[0];
     const bestTempo = sp(recent.filter(r=>r.miles>=3&&r.miles<=5))[0];
+    // Best mile: scan individual mile splits from Strava (most accurate source)
+    // across the most recent 25 runs' splits, then fall back to 0.9–1.4 mi whole runs
+    const bestMileSec = (() => {
+      let fastest = null;
+      recent.forEach(r => {
+        (r.splits || []).forEach(s => {
+          if (s.paceSec && s.distMiles != null && s.distMiles >= 0.9 && s.distMiles <= 1.15) {
+            if (fastest === null || s.paceSec < fastest) fastest = s.paceSec;
+          }
+        });
+      });
+      // Fall back to whole-run 1-mile efforts if no split data available
+      if (fastest === null) {
+        const wholeRun = sp(recent.filter(r=>r.miles>=0.9&&r.miles<=1.4))[0];
+        fastest = wholeRun ? wholeRun.paceSec : null;
+      }
+      return fastest;
+    })();
     const bestMile  = sp(recent.filter(r=>r.miles>=0.9&&r.miles<=1.4))[0];
     const bestHM    = sp(recent.filter(r=>r.miles>=11&&r.miles<=14))[0];
     const bestLong  = sp(recent.filter(r=>r.miles>=14))[0];
@@ -1411,7 +1521,7 @@ export default function Dashboard() {
     return {
       best10KPace:   best10K   ? paceSecToLabel(best10K.paceSec)   : null,
       bestTempoPace: bestTempo ? paceSecToLabel(bestTempo.paceSec) : null,
-      bestMilePace:  bestMile  ? paceSecToLabel(bestMile.paceSec)  : null,
+      bestMilePace:  bestMileSec != null ? paceSecToLabel(Math.round(bestMileSec)) : null,
       bestHMPace:    bestHM    ? paceSecToLabel(bestHM.paceSec)    : null,
       bestLongPace:  bestLong  ? paceSecToLabel(bestLong.paceSec)  : null,
       marathonPred:  marathonPredSec ? paceSecToLabel(Math.round(marathonPredSec)) : null,
@@ -1624,7 +1734,7 @@ export default function Dashboard() {
   const TABS = [
     { id:"overview", label:"Training Overview" },
     { id:"report",   label:"Coach's Report"    },
-    { id:"rawstats", label:"Raw Stats"          },
+    { id:"rawstats", label:"Run Details"         },
   ];
 
   if (loading) return (
@@ -1758,6 +1868,20 @@ export default function Dashboard() {
 
           {(() => {
             const allTimeBestMile = (() => {
+              // Scan per-mile Strava splits first (most accurate — actual mile efforts)
+              let bestSec = null, bestDate = null;
+              runs.forEach(r => {
+                (r.splits || []).forEach(s => {
+                  if (s.paceSec && s.distMiles != null && s.distMiles >= 0.9 && s.distMiles <= 1.15) {
+                    if (bestSec === null || s.paceSec < bestSec) {
+                      bestSec = s.paceSec;
+                      bestDate = r.date;
+                    }
+                  }
+                });
+              });
+              if (bestSec !== null) return { sec: bestSec, date: bestDate };
+              // Fall back to whole runs ~1 mile
               const paceRuns = runs.filter(r=>r.paceSec && kmToMi(r.dist)>=0.9);
               if (!paceRuns.length) return null;
               const best = paceRuns.reduce((b,r)=>r.paceSec < b.paceSec ? r : b);
@@ -1949,20 +2073,35 @@ export default function Dashboard() {
                         { id:"z5", label:"Zone 5", desc:"≥ 178 bpm", color:"#EF5350", textColor:"#B71C1C", pctTarget:null, note:"VO₂ Max" },
                       ];
 
-                      // Calculate time in each zone from this week's runs
+                      // Calculate time in each zone — prefer mile-level split HR from Strava
+                      // for accuracy; fall back to run-average HR when splits lack HR data.
                       let totalMin = 0;
                       const zoneMinutes = { z1:0, z2:0, z3:0, z4:0, z5:0 };
 
-                      thisWeekRuns.forEach(r => {
-                        if (r.avgHR == null) return;
-                        const min = r.movingTimeSec ? r.movingTimeSec / 60 : 0;
+                      const assignZone5 = (hr, min) => {
+                        if (hr == null || min <= 0) return;
                         totalMin += min;
-                        // Estimate zone from avg HR (approximation — per-minute data would be more precise)
-                        if      (r.avgHR < 138) zoneMinutes.z1 += min;
-                        else if (r.avgHR < 152) zoneMinutes.z2 += min;
-                        else if (r.avgHR < 165) zoneMinutes.z3 += min;
-                        else if (r.avgHR < 178) zoneMinutes.z4 += min;
-                        else                    zoneMinutes.z5 += min;
+                        if      (hr < 138) zoneMinutes.z1 += min;
+                        else if (hr < 152) zoneMinutes.z2 += min;
+                        else if (hr < 165) zoneMinutes.z3 += min;
+                        else if (hr < 178) zoneMinutes.z4 += min;
+                        else               zoneMinutes.z5 += min;
+                      };
+
+                      thisWeekRuns.forEach(r => {
+                        const splits = r.splits || [];
+                        const splitsWithHR = splits.filter(s => s.avgHR != null && s.movingTimeSec > 0);
+                        if (splitsWithHR.length >= 1) {
+                          // Use per-mile split HR for precision
+                          splitsWithHR.forEach(s => assignZone5(s.avgHR, s.movingTimeSec / 60));
+                          // Remaining time without split HR: fall back to run avg
+                          const coveredSec = splitsWithHR.reduce((a,s)=>a+s.movingTimeSec,0);
+                          const leftoverMin = Math.max(0, ((r.movingTimeSec ?? 0) - coveredSec) / 60);
+                          if (leftoverMin > 0 && r.avgHR != null) assignZone5(r.avgHR, leftoverMin);
+                        } else if (r.avgHR != null) {
+                          // No per-split HR — use run average as approximation
+                          assignZone5(r.avgHR, r.movingTimeSec ? r.movingTimeSec / 60 : 0);
+                        }
                       });
 
                       if (!totalMin) return null;
@@ -1980,7 +2119,7 @@ export default function Dashboard() {
                             <div>
                               <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:"0 0 2px" }}>HR Zone Breakdown · This Week</p>
                               <p style={{ color:C.midGray, fontSize:12, margin:0 }}>
-                                Estimated time in each heart rate zone. Zones based on Apple Watch thresholds.
+                                Time in each zone from mile-level Strava splits when available; falls back to run-average HR.
                               </p>
                             </div>
                             <p style={{ color:C.midGray, fontSize:12, margin:0, flexShrink:0, marginLeft:12 }}>{fmtMin(totalMin)} total</p>
@@ -2600,7 +2739,7 @@ export default function Dashboard() {
             {/* ═══ LONG RUN TRACKER ═══ */}
             <section style={{ marginBottom: isMob ? 32 : 48 }}>
               <SecTitle title="Long Run Tracker" color={C.navy}
-                toggleOptions={[{id:'chart',label:'Chart'},{id:'table',label:'Full Table'}]}
+                toggleOptions={[{id:'chart',label:'Chart'},{id:'table',label:'Full Table'},{id:'splits',label:'Splits'}]}
                 toggleValue={longRunView} onToggle={setLongRunView} />
               <p style={{ color:C.midGray, fontSize:14, margin:"0 0 16px" }}>
                 Long runs defined as ≥8 miles or ≥90 minutes. Building toward the 20–22 mi peak.
@@ -2612,13 +2751,29 @@ export default function Dashboard() {
                   const avgLongHR = longRuns.filter(r=>r.avgHR).length
                     ? Math.round(longRuns.filter(r=>r.avgHR).reduce((s,r)=>s+r.avgHR,0)/longRuns.filter(r=>r.avgHR).length)
                     : null;
+                  // Split consistency across all long runs: average std dev of mile paces
+                  const runsWithSplitConsistency = longRuns.filter(r => r.splitConsistency != null);
+                  const avgSplitConsistency = runsWithSplitConsistency.length
+                    ? +(runsWithSplitConsistency.reduce((s,r) => s+r.splitConsistency, 0) / runsWithSplitConsistency.length).toFixed(1)
+                    : null;
+                  // Last long run's pace fade (positive = positive split / faded)
+                  const lastFade = last.paceFadeSec;
                   return (
                     <div style={{ display:"grid", gridTemplateColumns: isMob ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:14, marginBottom:24 }}>
                       {[
                         { label:"Total Long Runs", value:longRuns.length, unit:"", sub:"≥8 mi or ≥90 min", color:C.navy, accent:C.navy },
                         { label:"Longest Run", value:longest.miles.toFixed(1), unit:" mi", sub:fmtDate(longest.date), color:C.red, accent:C.red },
                         { label:"Last Long Run", value:last.miles.toFixed(1), unit:" mi", sub:`${fmtDate(last.date)} · ${last.paceLabel}/mi`, color:C.bofaBlue, accent:C.bofaBlue },
-                        { label:"Avg HR on Longs", value:avgLongHR??"—", unit:" bpm", sub:avgLongHR==null?"no data":avgLongHR<150?"✓ Easy aerobic":avgLongHR<165?"Moderate effort":"Running hard", color:avgLongHR>165?C.red:avgLongHR>150?C.amber:C.green, accent:avgLongHR>165?C.red:avgLongHR>150?C.amber:C.green },
+                        avgSplitConsistency != null
+                          ? {
+                              label:"Avg Split σ",
+                              value:avgSplitConsistency,
+                              unit:" sec/mi",
+                              sub: avgSplitConsistency < 20 ? "✓ Consistent pacing" : avgSplitConsistency < 40 ? "Moderate variance" : "⚠ High variability",
+                              color: avgSplitConsistency < 20 ? C.green : avgSplitConsistency < 40 ? C.amber : C.red,
+                              accent: avgSplitConsistency < 20 ? C.green : avgSplitConsistency < 40 ? C.amber : C.red,
+                            }
+                          : { label:"Avg HR on Longs", value:avgLongHR??"—", unit:" bpm", sub:avgLongHR==null?"no data":avgLongHR<150?"✓ Easy aerobic":avgLongHR<165?"Moderate effort":"Running hard", color:avgLongHR>165?C.red:avgLongHR>150?C.amber:C.green, accent:avgLongHR>165?C.red:avgLongHR>150?C.amber:C.green },
                       ].map(s=>(
                         <div key={s.label} style={{
                           background:C.white,
@@ -2657,12 +2812,39 @@ export default function Dashboard() {
                       <Tooltip content={({ active, payload }) => {
                         if (!active||!payload?.[0]) return null;
                         const p=payload[0].payload;
+                        const fullSplits = (p.splits||[]).filter(s => s.distMiles != null && s.distMiles >= 0.85 && s.paceSec);
                         return (
                           <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:8, padding:"10px 14px", fontFamily:F, fontSize:13 }}>
                             <p style={{ color:C.navy, fontWeight:700, margin:"0 0 6px" }}>{p.date}</p>
                             <p style={{ color:p.isEasy?C.green:p.isGoalPace?C.red:C.navy, fontSize:17, fontWeight:800, margin:"0 0 3px" }}>{Number(p.miles).toFixed(1)} mi</p>
                             <Row label="Pace" value={`${p.paceLabel}/mi`} />
                             {p.avgHR&&<Row label="Avg HR" value={`${Math.round(p.avgHR)} bpm`} />}
+                            {p.paceFadeSec != null && (
+                              <Row
+                                label="Pace fade"
+                                value={p.paceFadeSec > 0 ? `+${Math.round(p.paceFadeSec)}s/mi` : `${Math.round(p.paceFadeSec)}s/mi (neg split)`}
+                                color={p.paceFadeSec > 60 ? C.red : p.paceFadeSec > 20 ? C.amber : C.green}
+                              />
+                            )}
+                            {p.splitConsistency != null && (
+                              <Row
+                                label="Split σ"
+                                value={`±${p.splitConsistency}s/mi`}
+                                color={p.splitConsistency < 20 ? C.green : p.splitConsistency < 40 ? C.amber : C.red}
+                              />
+                            )}
+                            {fullSplits.length > 0 && (
+                              <div style={{ marginTop:6, paddingTop:6, borderTop:`1px solid ${C.light}` }}>
+                                <p style={{ color:C.midGray, fontSize:11, fontWeight:600, letterSpacing:"0.07em", textTransform:"uppercase", margin:"0 0 4px" }}>Mile splits</p>
+                                {fullSplits.map(s => (
+                                  <div key={s.mile} style={{ display:"flex", justifyContent:"space-between", gap:12 }}>
+                                    <span style={{ color:C.midGray, fontSize:11 }}>mi {s.mile}</span>
+                                    <span style={{ fontFamily:"monospace", fontSize:12, color:C.navy, fontWeight:600 }}>{paceSecToLabel(Math.round(s.paceSec))}</span>
+                                    {s.avgHR && <span style={{ fontSize:11, color:hrColor(s.avgHR) }}>{Math.round(s.avgHR)} bpm</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         );
                       }} />
@@ -2700,7 +2882,7 @@ export default function Dashboard() {
                     <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:F, fontSize:14 }}>
                       <thead>
                         <tr style={{ borderBottom:`2px solid ${C.border}` }}>
-                          {["Date","Miles","Time","Pace","Avg HR","Type"].map(h=>(
+                          {["Date","Miles","Time","Pace","Avg HR","Fade","σ splits","Type"].map(h=>(
                             <th key={h} style={{ textAlign:h==="Date"||h==="Type"?"left":"right", padding:"7px 10px", color:C.midGray, fontWeight:600, fontSize:12, letterSpacing:"0.06em", textTransform:"uppercase" }}>{h}</th>
                           ))}
                         </tr>
@@ -2716,6 +2898,18 @@ export default function Dashboard() {
                               color:r.avgHR?r.avgHR<150?C.green:r.avgHR<165?C.amber:C.red:C.midGray }}>
                               {r.avgHR ? <>{Math.round(r.avgHR)} <span style={{ fontWeight:400, color:C.midGray }}>bpm</span></> : "—"}
                             </td>
+                            <td style={{ textAlign:"right", padding:"8px 10px", fontSize:12,
+                              color:r.paceFadeSec == null ? C.midGray : r.paceFadeSec <= 20 ? C.green : r.paceFadeSec <= 60 ? C.amber : C.red }}>
+                              {r.paceFadeSec != null
+                                ? r.paceFadeSec <= 0
+                                  ? <span title="Negative split">↓ {Math.abs(Math.round(r.paceFadeSec))}s</span>
+                                  : `+${Math.round(r.paceFadeSec)}s`
+                                : "—"}
+                            </td>
+                            <td style={{ textAlign:"right", padding:"8px 10px", fontSize:12,
+                              color:r.splitConsistency == null ? C.midGray : r.splitConsistency < 20 ? C.green : r.splitConsistency < 40 ? C.amber : C.red }}>
+                              {r.splitConsistency != null ? `±${r.splitConsistency}s` : "—"}
+                            </td>
                             <td style={{ padding:"8px 10px", fontSize:12 }}>
                               <span style={{ fontSize:11, fontWeight:600, padding:"2px 7px", borderRadius:3,
                                 color:r.isEasy?C.green:r.isGoalPace?C.red:C.midGray,
@@ -2727,8 +2921,109 @@ export default function Dashboard() {
                         ))}
                       </tbody>
                     </table>
+                    <div style={{ display:"flex", gap:20, marginTop:10, fontSize:12, color:C.midGray }}>
+                      <span><strong style={{ color:C.darkGray }}>Fade</strong> = last mile minus first mile pace. Positive = slowed down. ≤20s = even; ≤60s = moderate drift; &gt;60s = significant fade.</span>
+                      <span><strong style={{ color:C.darkGray }}>σ splits</strong> = standard deviation of all mile paces. Lower = more consistent effort.</span>
+                    </div>
                   </div>
                   )}
+                  {longRunView==='splits' && (() => {
+                    const runsWithSplitData = longRunsWithEffort.filter(r => r.splits && r.splits.filter(s => s.distMiles != null && s.distMiles >= 0.85 && s.paceSec).length >= 2);
+                    if (!runsWithSplitData.length) return (
+                      <p style={{ color:C.midGray, fontSize:14, textAlign:"center", padding:"24px 0" }}>No mile-level split data available for long runs yet.</p>
+                    );
+                    return (
+                      <div style={{ display:"flex", flexDirection:"column", gap:24 }}>
+                        {runsWithSplitData.slice(-6).reverse().map(r => {
+                          const fullSplits = r.splits.filter(s => s.distMiles != null && s.distMiles >= 0.85 && s.paceSec);
+                          const hasSplitHR = fullSplits.some(s => s.avgHR);
+                          const maxPace = Math.max(...fullSplits.map(s => s.paceSec));
+                          const minPace = Math.min(...fullSplits.map(s => s.paceSec));
+                          const fadeColor = r.paceFadeSec == null ? C.midGray : r.paceFadeSec <= 20 ? C.green : r.paceFadeSec <= 60 ? C.amber : C.red;
+                          return (
+                            <div key={r.date} style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:"16px 20px", boxShadow:"0 2px 10px rgba(1,33,105,0.05)" }}>
+                              {/* Run header */}
+                              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:8, marginBottom:14 }}>
+                                <div style={{ display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+                                  <p style={{ color:C.navy, fontSize:16, fontWeight:800, margin:0 }}>{fmtDate(r.date)}</p>
+                                  <span style={{ color:C.midGray, fontSize:13 }}>{r.miles.toFixed(1)} mi · {r.paceLabel}/mi avg</span>
+                                  {r.avgHR && <span style={{ color:hrColor(r.avgHR), fontSize:13, fontWeight:600 }}>{Math.round(r.avgHR)} bpm</span>}
+                                </div>
+                                <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                                  {r.paceFadeSec != null && (
+                                    <span style={{ fontSize:12, fontWeight:600, color:fadeColor, background:fadeColor+"15", borderRadius:4, padding:"2px 8px" }}>
+                                      {r.paceFadeSec <= 0 ? `↓ Negative split ${Math.abs(Math.round(r.paceFadeSec))}s` : `Fade +${Math.round(r.paceFadeSec)}s/mi`}
+                                    </span>
+                                  )}
+                                  {r.splitConsistency != null && (
+                                    <span style={{ fontSize:12, fontWeight:600, color:r.splitConsistency < 20 ? C.green : r.splitConsistency < 40 ? C.amber : C.red, background: (r.splitConsistency < 20 ? C.green : r.splitConsistency < 40 ? C.amber : C.red)+"15", borderRadius:4, padding:"2px 8px" }}>
+                                      σ ±{r.splitConsistency}s
+                                    </span>
+                                  )}
+                                  {r.hrDrift != null && (
+                                    <span style={{ fontSize:12, color:C.midGray, background:C.light, borderRadius:4, padding:"2px 8px" }}>
+                                      HR drift {r.hrDrift > 0 ? `+${Math.round(r.hrDrift)}` : Math.round(r.hrDrift)} bpm
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Per-mile visual pace bar chart */}
+                              <div style={{ marginBottom:12 }}>
+                                <p style={{ color:C.midGray, fontSize:11, fontWeight:600, letterSpacing:"0.08em", textTransform:"uppercase", margin:"0 0 8px" }}>Pace per mile</p>
+                                <div style={{ display:"flex", alignItems:"flex-end", gap:3, height:70 }}>
+                                  {fullSplits.map((s, i) => {
+                                    // Higher pace sec = slower = taller bar visually inverted → use inverse so faster = taller
+                                    const range = maxPace - minPace || 1;
+                                    const heightPct = 35 + 55 * (1 - (s.paceSec - minPace) / range); // 35-90% height
+                                    const isFastest = s.paceSec === minPace;
+                                    const isSlowest = s.paceSec === maxPace && fullSplits.length > 2;
+                                    const barColor = isFastest ? C.green : isSlowest ? C.amber : C.navy;
+                                    return (
+                                      <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:2 }}>
+                                        <span style={{ fontSize:9, color:C.midGray, fontFamily:"monospace", lineHeight:1 }}>
+                                          {paceSecToLabel(Math.round(s.paceSec))}
+                                        </span>
+                                        <div style={{ width:"100%", height:`${heightPct}%`, background:barColor, borderRadius:"3px 3px 0 0", opacity:0.85, minHeight:6 }} />
+                                        <span style={{ fontSize:9, color:C.midGray }}>{s.mile}</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+
+                              {/* HR drift bar if available */}
+                              {hasSplitHR && (() => {
+                                const splitsWithHR = fullSplits.filter(s => s.avgHR);
+                                const maxHR = Math.max(...splitsWithHR.map(s => s.avgHR));
+                                const minHR = Math.min(...splitsWithHR.map(s => s.avgHR));
+                                return (
+                                  <div>
+                                    <p style={{ color:C.midGray, fontSize:11, fontWeight:600, letterSpacing:"0.08em", textTransform:"uppercase", margin:"0 0 6px" }}>Heart rate per mile</p>
+                                    <div style={{ display:"flex", alignItems:"flex-end", gap:3, height:48 }}>
+                                      {fullSplits.map((s, i) => {
+                                        if (!s.avgHR) return <div key={i} style={{ flex:1 }} />;
+                                        const range = maxHR - minHR || 1;
+                                        const heightPct = 20 + 75 * ((s.avgHR - minHR) / range);
+                                        const hrC = hrColor(s.avgHR);
+                                        return (
+                                          <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:1 }}>
+                                            <span style={{ fontSize:8, color:C.midGray, lineHeight:1 }}>{Math.round(s.avgHR)}</span>
+                                            <div style={{ width:"100%", height:`${heightPct}%`, background:hrC, borderRadius:"2px 2px 0 0", opacity:0.7, minHeight:4 }} />
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          );
+                        })}
+                        <p style={{ color:C.midGray, fontSize:12, textAlign:"center" }}>Showing last {Math.min(6, runsWithSplitData.length)} long runs with mile-level data · Most recent first</p>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {longRuns90Min.length > 0 && (
@@ -3327,8 +3622,6 @@ export default function Dashboard() {
 
           const toggleSort = (key) => setRunSort(s => s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "desc" });
 
-          const hrColor = hr => !hr ? C.midGray : hr > 165 ? C.red : hr > 150 ? C.amber : C.green;
-
           // Drill-in modal
           if (selectedRun) {
             const r = selectedRun;
@@ -3400,15 +3693,78 @@ export default function Dashboard() {
                   const hasPower = r.splits.some(s => s.avgPower);
                   const hasGCT   = r.splits.some(s => s.avgGCT);
                   const hasVO    = r.splits.some(s => s.avgVO);
+                  const hasHR    = r.splits.some(s => s.avgHR);
                   const fullMilesWithPace = r.splits.filter(s => s.distMiles != null && s.distMiles >= 0.85 && s.paceSec);
                   const fastest = fullMilesWithPace.length ? fullMilesWithPace.reduce((a,b) => a.paceSec < b.paceSec ? a : b) : null;
                   const slowest = fullMilesWithPace.length ? fullMilesWithPace.reduce((a,b) => a.paceSec > b.paceSec ? a : b) : null;
+                  // Build chart data
+                  const splitChartData = fullMilesWithPace.map(s => ({
+                    mile: `mi ${s.mile}`,
+                    paceSec: s.paceSec ? Math.round(s.paceSec) : null,
+                    avgHR: s.avgHR ? Math.round(s.avgHR) : null,
+                    avgPower: s.avgPower ? Math.round(s.avgPower) : null,
+                  }));
+                  const showSplitChart = splitChartData.length >= 2 && (hasPace || hasHR);
                   return (
                     <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)", marginTop:16 }}>
                       <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14, flexWrap:"wrap" }}>
                         <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:0 }}>Mile Splits ({r.splits.length})</p>
                         {r.stravaId && <span style={{ fontSize:11, color:C.midGray, background:C.light, padding:"2px 8px", borderRadius:10 }}>via Strava</span>}
                       </div>
+
+                      {/* Split visualization chart */}
+                      {showSplitChart && (
+                        <div style={{ marginBottom:18 }}>
+                          <p style={{ color:C.midGray, fontSize:11, fontWeight:600, letterSpacing:"0.08em", textTransform:"uppercase", margin:"0 0 8px" }}>
+                            Pace progression{hasHR ? " & heart rate" : ""}
+                          </p>
+                          <ResponsiveContainer width="100%" height={150}>
+                            <ComposedChart data={splitChartData} margin={{ top:4, right:hasPace&&hasHR?36:8, bottom:4, left:4 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke={C.light} vertical={false} />
+                              <XAxis dataKey="mile" tick={{ fontSize:11, fill:C.midGray }} axisLine={{ stroke:C.border }} tickLine={false} />
+                              {hasPace && (
+                                <YAxis
+                                  yAxisId="pace"
+                                  orientation="left"
+                                  tick={{ fontSize:10, fill:C.navy }}
+                                  tickFormatter={v => `${Math.floor(v/60)}:${String(v%60).padStart(2,"0")}`}
+                                  domain={['auto','auto']}
+                                  reversed
+                                  axisLine={false} tickLine={false} width={36}
+                                />
+                              )}
+                              {hasHR && (
+                                <YAxis
+                                  yAxisId="hr"
+                                  orientation="right"
+                                  tick={{ fontSize:10, fill:C.red }}
+                                  domain={['auto','auto']}
+                                  axisLine={false} tickLine={false} width={30}
+                                />
+                              )}
+                              <Tooltip
+                                contentStyle={{ fontSize:12, fontFamily:F, border:`1px solid ${C.border}` }}
+                                formatter={(v, name) => {
+                                  if (name === "paceSec") return [`${Math.floor(v/60)}:${String(v%60).padStart(2,"00")}/mi`, "Pace"];
+                                  if (name === "avgHR") return [`${v} bpm`, "HR"];
+                                  if (name === "avgPower") return [`${v} W`, "Power"];
+                                  return [v, name];
+                                }}
+                              />
+                              {hasPace && (
+                                <Line yAxisId="pace" type="monotone" dataKey="paceSec" stroke={C.navy} strokeWidth={2.5} dot={{ fill:C.navy, r:3 }} activeDot={{ r:5 }} connectNulls />
+                              )}
+                              {hasHR && (
+                                <Line yAxisId="hr" type="monotone" dataKey="avgHR" stroke={C.red} strokeWidth={2} dot={{ fill:C.red, r:2 }} strokeDasharray="4 2" connectNulls />
+                              )}
+                            </ComposedChart>
+                          </ResponsiveContainer>
+                          <div style={{ display:"flex", gap:16, marginTop:4 }}>
+                            {hasPace && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:11, color:C.midGray }}><span style={{ width:14, height:2, background:C.navy, display:"inline-block" }} />Pace (left axis)</span>}
+                            {hasHR && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:11, color:C.midGray }}><span style={{ width:14, height:2, background:C.red, display:"inline-block", borderTop:"2px dashed "+C.red, borderBottom:"none" }} />HR (right axis)</span>}
+                          </div>
+                        </div>
+                      )}
                       <div style={{ overflowX:"auto" }}>
                         <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:F, fontSize:13 }}>
                           <thead>
@@ -3475,12 +3831,25 @@ export default function Dashboard() {
                           </span>
                           {(() => {
                             const spread = slowest.paceSec - fastest.paceSec;
+                            const fadeSec = fullMilesWithPace[fullMilesWithPace.length-1].paceSec - fullMilesWithPace[0].paceSec;
+                            const paces = fullMilesWithPace.map(s => s.paceSec);
+                            const meanPace = paces.reduce((a,b)=>a+b,0)/paces.length;
+                            const sigma = +Math.sqrt(paces.reduce((a,b)=>a+Math.pow(b-meanPace,2),0)/paces.length).toFixed(1);
                             return (
-                              <span style={{ fontSize:12, color:spread > 90 ? C.amber : C.midGray }}>
-                                <span style={{ fontWeight:700 }}>Spread: </span>
-                                {paceSecToLabel(Math.round(spread))}/mi
-                                {spread > 90 && <span style={{ color:C.amber }}> · high variability</span>}
-                              </span>
+                              <>
+                                <span style={{ fontSize:12, color:spread > 90 ? C.amber : C.midGray }}>
+                                  <span style={{ fontWeight:700 }}>Spread: </span>
+                                  {paceSecToLabel(Math.round(spread))}/mi
+                                  {spread > 90 && <span style={{ color:C.amber }}> · high variability</span>}
+                                </span>
+                                <span style={{ fontSize:12, color: fadeSec <= 20 ? C.green : fadeSec <= 60 ? C.amber : C.red }}>
+                                  <span style={{ fontWeight:700 }}>Fade: </span>
+                                  {fadeSec > 0 ? `+${Math.round(fadeSec)}s/mi` : `${Math.round(fadeSec)}s/mi (neg split ✓)`}
+                                </span>
+                                <span style={{ fontSize:12, color: sigma < 20 ? C.green : sigma < 40 ? C.amber : C.red }}>
+                                  <span style={{ fontWeight:700 }}>σ: </span>±{sigma}s/mi
+                                </span>
+                              </>
                             );
                           })()}
                         </div>
