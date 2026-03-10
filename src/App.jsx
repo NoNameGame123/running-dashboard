@@ -548,7 +548,7 @@ function summarizeTrainingData(runs, computed) {
     avgHR, thisWeekMi, thisWeekRuns, avgPaceFmt30, totalMi,
     trainingMonotony, runs: allRuns, weekly, longRunTrend,
     hrTimeReg, firstRunDate, criticalPaceData, longRuns90Min,
-    acwrHistory, crossTraining,
+    acwrHistory, crossTraining, dowStats,
   } = computed;
 
   const today = new Date();
@@ -562,43 +562,41 @@ function summarizeTrainingData(runs, computed) {
     ? "race-specific"
     : "taper";
 
-    const easyPct150 = (() => {
-      let easyMin = 0, totalMin = 0;
-      let splitRunsUsed = 0;
-      let fallbackRunsUsed = 0;
-    
-      allRuns.forEach(r => {
-        const splits = r.splits || [];
-        const hasGoodSplits = splits.length >= 2 && splits.some(s => s.avgHR && s.movingTimeSec);
-    
-        if (hasGoodSplits) {
-          splitRunsUsed++;
-          splits.forEach(s => {
-            if (s.avgHR && s.movingTimeSec) {
-              totalMin += s.movingTimeSec / 60;
-              if (s.avgHR < 152) easyMin += s.movingTimeSec / 60;
-            }
-          });
-        } else if (r.avgHR != null) {
-          fallbackRunsUsed++;
-          const min = r.movingTimeSec ? r.movingTimeSec / 60 : (r.paceSec && r.dist ? r.dist * r.paceSec / 60 : 0);
-          totalMin += min;
-          if (r.avgHR < 152) easyMin += min;
-        }
-      });
-    
-      const pct = totalMin > 0 ? +(easyMin / totalMin * 100).toFixed(1) : null;
-    
-      // ── DEBUG OUTPUT ──
-      console.log("=== EASY PCT150 SPLIT DEBUG ===");
-      console.log(`Total runs: ${allRuns.length}`);
-      console.log(`✅ Using mile-level HR: ${splitRunsUsed} runs`);
-      console.log(`⚠️  Using whole-run fallback: ${fallbackRunsUsed} runs`);
-      console.log(`NEW Easy % for Coach's Report: ${pct}%`);
-      console.log("=================================");
-    
-      return pct;
-    })();
+  // Easy% computed at mile-split granularity where available, falling back to run-avg HR.
+  // This is the most accurate methodology — split-level HR weights each minute of effort correctly.
+  const easyPctSplitBased = (() => {
+    let easyMin = 0, modMin = 0, hardMin = 0;
+    let splitRunsUsed = 0, fallbackRunsUsed = 0;
+    allRuns.forEach(r => {
+      const splits = r.splits || [];
+      const hasGoodSplits = splits.length >= 2 && splits.some(s => s.avgHR && s.movingTimeSec);
+      if (hasGoodSplits) {
+        splitRunsUsed++;
+        splits.forEach(s => {
+          if (s.avgHR && s.movingTimeSec) {
+            const m = s.movingTimeSec / 60;
+            if (s.avgHR < 152) easyMin += m;
+            else if (s.avgHR < 165) modMin += m;
+            else hardMin += m;
+          }
+        });
+      } else if (r.avgHR != null) {
+        fallbackRunsUsed++;
+        const m = r.movingTimeSec ? r.movingTimeSec / 60 : (r.paceSec && r.dist ? r.dist * r.paceSec / 60 : 0);
+        if (r.avgHR < 152) easyMin += m;
+        else if (r.avgHR < 165) modMin += m;
+        else hardMin += m;
+      }
+    });
+    const total = easyMin + modMin + hardMin;
+    if (!total) return null;
+    return {
+      easyPct: +(easyMin / total * 100).toFixed(1),
+      modPct:  +(modMin  / total * 100).toFixed(1),
+      hardPct: +(hardMin / total * 100).toFixed(1),
+      method: `mile-split HR (${splitRunsUsed} runs) + run-avg fallback (${fallbackRunsUsed} runs)`,
+    };
+  })();
 
   const last4Weeks = weekly ? weekly.slice(-4).map(w => ({ week: w.label, miles: w.miles, runs: w.runs })) : [];
 
@@ -717,6 +715,19 @@ function summarizeTrainingData(runs, computed) {
       }, {});
   })();
 
+  // Day-of-week patterns for week plan generation
+  const trainingPatternsByDay = dowStats ? dowStats.map(d => ({
+    day: d.day,
+    totalRuns: d.runs,
+    avgMilesPerRun: d.avgMiles,
+    avgHR: d.avgHR,
+    effortTendency: d.avgHR == null ? "unknown" : d.avgHR < 152 ? "easy" : d.avgHR < 165 ? "moderate" : "hard",
+  })) : [];
+
+  const activeDays = trainingPatternsByDay.filter(d => d.totalRuns > 0);
+  const restDays = trainingPatternsByDay.filter(d => d.totalRuns === 0).map(d => d.day);
+  const highMileageDays = [...activeDays].sort((a,b) => b.avgMilesPerRun - a.avgMilesPerRun).slice(0,2).map(d => d.day);
+
   return {
     today: todayStr,
     weeksToRace,
@@ -738,7 +749,7 @@ function summarizeTrainingData(runs, computed) {
       hardPct: weeklyPolarized.current.find(z => z.id === "hard")?.pct ?? null,
     },
     weeklyVolumeTrend,
-    allTimeEasyPct: easyPct150,
+    intensityDistribution: easyPctSplitBased,
     avgPaceLast30d: avgPaceFmt30,
     avgHRLast30d: avgHR,
     avgMilesPerRunLast30d: avgMilesPerRun30,
@@ -759,23 +770,19 @@ function summarizeTrainingData(runs, computed) {
     bestRecentPace,
     recentRunsDetail,
     recentCrossTraining,
+    trainingPatternsByDay,
+    habitual: { activeDays: activeDays.map(d => d.day), restDays, highMileageDays },
     athleteContext: {
-      experience: "newer runner, aerobic base still developing — in first structured marathon training block",
-      easyRunHRBaseline: "140s bpm is normal and expected for this athlete — do NOT flag as too hard",
+      name: "John",
+      experience: "newer runner, first structured marathon training block, aerobic base still developing",
+      easyRunHRBaseline: "140s bpm is John's aerobic baseline — do NOT flag as too hard",
       hrZones: {
         easy: "<152 bpm (Z1+Z2)",
-        moderate: "152–165 bpm (Z3, the grey zone — avoid accumulating here)",
+        moderate: "152–165 bpm (Z3, grey zone — avoid accumulating here)",
         hard: "165+ bpm (Z4–Z5, true quality work)",
       },
-      interpretationNotes: [
-        "HR in the 140s = easy aerobic for this athlete. This is healthy and expected.",
-        "Pacing consistency (sigma) below 20s/mi = excellent long run control.",
-        "Pace fade under 20s = even pacing; under 60s = normal fatigue; over 60s = went out too hard.",
-        "HR drift under 8 bpm = good aerobic endurance; over 16 bpm = cardiovascular strain accumulating.",
-        "ACWR above 1.3 = elevated injury risk; above 1.5 = high risk. Current phase: protect base.",
-      ],
-      seasonGoal: "Build aerobic base across 32-week Chicago build. Long run to 20–22 mi peak. Easy HR will drift lower as season progresses.",
-      raceGoal: "Finish under 4:14:52 (beat Diddy's marathon time). Current marathon prediction vs target matters.",
+      raceGoal: "Finish Chicago Marathon under 4:14:52. Current prediction vs target is always relevant.",
+      seasonGoal: "Build aerobic base across 32-week Chicago build. Long run to 20–22 mi peak.",
     },
   };
 }
@@ -786,7 +793,7 @@ function hashSummary(summary) {
     summary.thisWeek.miles,
     summary.weeksToRace,
     summary.avgHRLast30d ?? 0,
-    summary.allTimeEasyPct150 ?? 0,
+    summary.allTimeEasyPct ?? 0,
     summary.recentLongRuns?.[summary.recentLongRuns.length - 1]?.miles ?? 0,
     summary.totalRunsAllTime,
   ].join("|");
@@ -829,17 +836,23 @@ function CoachReport({ summary }) {
 
     const phaseContext = phasePrompts[summary.phase] || phasePrompts["base-building"];
 
-    const systemPrompt = `You are coaching in the direct, evidence-based style of Steve Magness. You have full access to this athlete's Strava and Apple Watch data — use it precisely.\n\nMAGNESS PHILOSOPHY:\n1. Stress + Rest = Adaptation. Easy days are when adaptation from hard work gets consolidated. Most recreational athletes chronically under-recover.\n2. Polarize ruthlessly. 80% easy, 20% hard. The grey zone (152–165 bpm) is the enemy — too hard to recover from, too easy to drive adaptation.\n3. Build aerobic infrastructure first. Mitochondrial density, fat oxidation, cardiac stroke volume — built at low intensity. The aerobic base is the ceiling for everything else.\n4. Progressive overload with planned recovery. ACWR above 1.3 = yellow. Above 1.5 = red. Volume builds in 3-week blocks then a down week.\n5. Specificity late, base early. Marathon-specific work only in final 10–12 weeks. Now: build the engine.\n6. Long runs are the cornerstone. Must be easy (HR <152 for this athlete). Running them too hard is the most common mistake in marathon prep.\n7. Trust the data over the plan. This athlete's numbers tell a specific story — read it.\n\nATHLETE CONTEXT — non-negotiable, always apply:\n- Newer runner in first structured marathon training block. Base is developing — this is expected, not a problem.\n- Easy runs sit in the 140s bpm — this is their aerobic baseline. Do NOT flag 140s HR as too hard.\n- HR zones (athlete-specific only): easy <152 bpm · moderate 152–165 · hard 165+\n- Race goal: finish Chicago Marathon under 4:14:52. Every training decision is in service of that.\n- Season goal: by race week, runs that feel hard now should feel easy — that's the aerobic adaptation.\n\nINTERPRETING KEY METRICS:\n- Pace fade (last mile − first mile): ≤20s = even; ≤60s = normal drift; >60s = went out too hard\n- HR drift (last mile − first mile HR): <8 bpm = strong aerobic endurance; 8–16 = moderate; >16 = cardiovascular strain accumulating\n- Split σ (std dev of mile paces): <20s = excellent consistency; 20–40s = moderate; >40s = erratic effort control\n- ACWR ratio: sweet spot 0.8–1.3. Above 1.3 = elevated injury risk\n- Long run quality trend: improving fade/drift over time = aerobic system is adapting and strengthening\n- Training monotony: <1.5 = good variety; >2.0 = risky sameness increasing injury probability\n- allTimeEasyPct: percentage of all training time spent at easy HR. Target is ≥80%. Grey zone accumulation (moderate %) is the key risk to watch.\n\nTODAY: ${summary.today}\nTRAINING PHASE: ${summary.phase.toUpperCase()} — ${phaseContext}\nRACE: ${summary.raceDate} | ${summary.weeksToRace} weeks to go\nMARATHON TARGET: under 4:14:52 | Current prediction: ${summary.criticalPaces?.marathonPrediction ?? "unknown"}\n\nOUTPUT FORMAT — respond ONLY with this exact JSON, no markdown, no preamble:\n{\n  "concerns": [\n    { "level": "HIGH|MEDIUM", "title": "concise title", "body": "2-4 sentences. State the specific pattern from the data, explain the physiological mechanism (why it matters for marathon prep), and give a concrete fix. Cite actual numbers.", "stillApplicable": true }\n  ],\n  "guidance": [\n    { "n": "01", "title": "action-oriented title", "body": "3-5 sentences. Ground in physiology. Name the adaptation mechanism. Reference actual numbers — pace, HR, mileage, ACWR, splits, long run trends. Be direct." }\n  ],\n  "thisWeekAction": "One concrete workout prescription. Specific: distance, target HR or pace range, context. Must reference actual current numbers. 2-3 sentences.",\n  \"generatedAt\": \"${new Date().toISOString()}\"\n}\n\nRules: HIGH concerns before MEDIUM. Exactly 3 guidance items. thisWeekAction = real prescription with numbers, not a principle.`;
+    const systemPrompt = `You are a marathon coach analyzing John's training data in the direct, evidence-based style of Steve Magness. Your job is to produce insights — not summaries. John can read his own data. Tell him what it means.\n\nMAGNESS PHILOSOPHY (apply to every piece of advice):\n1. Stress + Rest = Adaptation. Easy days consolidate hard work. Most runners under-recover.\n2. Polarize ruthlessly. 80% easy, 20% hard. The grey zone (152–165 bpm) stalls adaptation — too hard to recover from, too easy to drive improvement.\n3. Aerobic infrastructure first. Mitochondrial density, fat oxidation, cardiac stroke volume are built at low intensity. The aerobic base is the ceiling for everything else.\n4. Progressive overload. ACWR above 1.3 = caution. Above 1.5 = back off. 3 weeks build, 1 week recovery.\n5. Specificity late. Marathon-specific work belongs in the final 10–12 weeks. Right now: build the engine.\n6. Long runs are the cornerstone. They must be easy. Running them too hard is the most common marathon prep mistake.\n\nJOHN'S CONTEXT (non-negotiable):\n- Name: John. Use "John" throughout — never "the athlete".\n- Newer runner, first structured marathon training block. Base is developing — this is the plan, not a problem.\n- Easy runs sit naturally in the 140s bpm. This is John's aerobic baseline. Do NOT flag 140s HR as too hard.\n- HR zones (John-specific): easy <152 bpm · moderate 152–165 · hard 165+\n- Race goal: finish Chicago Marathon under 4:14:52. Quantify the gap to this target when data allows.\n- Season goal: by race week, what feels hard now should feel easy — that's the aerobic adaptation.\n\nMETRIC THRESHOLDS:\n- Pace fade: ≤20s = even; ≤60s = acceptable drift; >60s = started too fast\n- HR drift: <8 bpm = strong endurance; 8–16 = moderate; >16 = cardiovascular strain\n- Split σ: <20s = excellent; 20–40s = moderate; >40s = erratic pacing\n- ACWR: 0.8–1.3 = safe; above 1.3 = elevated risk\n- intensityDistribution.easyPct: measured from mile-level Strava splits where available (most accurate). Target ≥80%.\n\nTODAY: ${summary.today}\nPHASE: ${summary.phase.toUpperCase()} — ${phaseContext}\nRACE: ${summary.raceDate} | ${summary.weeksToRace} weeks out\nMARATHON TARGET: sub-4:14:52 | Prediction: ${summary.criticalPaces?.marathonPrediction ?? "unknown"}\n\nOUTPUT — respond ONLY with this exact JSON, no markdown:\n{\n  "concerns": [\n    { "level": "HIGH|MEDIUM", "title": "concise title", "body": "2-3 sentences. Lead with the insight (what the pattern reveals about John's physiology or risk), then the mechanism, then a specific fix with numbers.", "stillApplicable": true }\n  ],\n  "guidance": [\n    { "n": "01", "title": "action-oriented title", "body": "2-3 sentences max. One core insight grounded in John's actual data. What it means, why it matters, what to do. No filler." }\n  ],\n  "thisWeekAction": "One concrete workout prescription for John this week. Include day, distance, HR ceiling or pace target, and why it addresses the most pressing pattern in the data. 2 sentences.",\n  "weekPlan": [\n    { "day": "Mon", "type": "rest|easy|moderate|long|workout", "description": "specific prescription: distance, HR ceiling, effort cue", "rationale": "one sentence: why this day/effort given John's patterns" }\n  ],\n  \"generatedAt\": \"${new Date().toISOString()}\"\n}\n\nRules: HIGH concerns first. Exactly 3 guidance items. weekPlan must cover all 7 days (Mon–Sun). Use John's habitual active days and rest days from trainingPatternsByDay to anchor the plan — don't prescribe runs on days he never runs. thisWeekAction must reference actual numbers from John's data.`;
 
     const lrq = summary.longRunQualityTrend;
     const lrTrendSummary = lrq
       ? `Long run quality (${lrq.runsAnalyzed} runs): fade ${lrq.earlyFadeSec}s → ${lrq.recentFadeSec}s | σ ${lrq.earlySigma}s → ${lrq.recentSigma}s | HR drift ${lrq.earlyHRDrift} → ${lrq.recentHRDrift} bpm`
       : "Long run quality trend: insufficient split data yet";
     const rib = summary.recentIntensityBreakdown;
-    const intensityStr = rib
-      ? `Last ${rib.total} runs with HR: ${rib.easy} easy / ${rib.moderate} moderate / ${rib.hard} hard`
-      : "Intensity breakdown: no HR data";
-    const userPrompt = `ATHLETE TRAINING DATA — analyze and generate a coach's report in Steve Magness's style.\n\nKEY METRICS SNAPSHOT:\n- Phase: ${summary.phase} | ${summary.weeksToRace} weeks to Chicago Marathon\n- This week: ${summary.thisWeek.miles} mi, ${summary.thisWeek.runs} runs | easy ${summary.thisWeek.easyPct}% / mod ${summary.thisWeek.moderatePct}% / hard ${summary.thisWeek.hardPct}% | avg HR ${summary.thisWeek.avgHR ?? "n/a"} bpm\n- ACWR: ${summary.acwr?.ratio ?? "unknown"} (${summary.acwr?.zone ?? "n/a"}) | acute ${summary.acwr?.acute ?? "?"} mi / chronic ${summary.acwr?.chronic ?? "?"} mi\n- Training monotony: ${summary.trainingMonotony ?? "n/a"} | Max consecutive days without rest: ${summary.maxConsecutiveDaysWithoutRest}\n- All-time easy %: ${summary.allTimeEasyPct}% (target ≥80%) | ${intensityStr}\n- HR trend over season: ${summary.hrTrendOverSeason} | Aerobic efficiency: ${summary.aerobicEfficiencyTrend}\n- Longest run: ${summary.longestRunToDate ?? "n/a"} mi across ${summary.longRunCount} long runs\n- ${lrTrendSummary}\n- Marathon prediction: ${summary.criticalPaces?.marathonPrediction ?? "unknown"} | Target: sub-4:14:52 | Best mile: ${summary.criticalPaces?.bestMilePace ?? "n/a"}\n- Best recent effort (4+ mi): ${summary.bestRecentPace ? summary.bestRecentPace.pace + "/mi for " + summary.bestRecentPace.miles + " mi on " + summary.bestRecentPace.date : "n/a"}\n\nFULL DATA:\n${JSON.stringify(summary, null, 2)}\n\nANALYSIS REMINDERS:\n- Today is ${summary.today}. Use exact dates — do not approximate.\n- HR in the 140s is fine. Do not flag it.\n- Athlete-specific zones only: easy <152, moderate 152–165, hard 165+.\n- Every concern and guidance must cite specific numbers from the data.\n- Long run quality trend (fade, drift, sigma improving or worsening) is a key signal of aerobic development.\n- The marathon prediction vs 4:14:52 is always relevant — quantify the gap when data allows.\n- generatedAt must be today's ISO date.`;
+    const intensityStr = rib ? `Last ${rib.total} HR-tracked runs: ${rib.easy} easy / ${rib.moderate} moderate / ${rib.hard} hard` : "no HR data";
+    const idist = summary.intensityDistribution;
+    const intensityDistStr = idist
+      ? `Intensity split (mile-level Strava splits, most accurate): ${idist.easyPct}% easy / ${idist.modPct}% moderate / ${idist.hardPct}% hard [method: ${idist.method}]`
+      : "Intensity distribution: no data";
+    const habitual = summary.habitual;
+    const patternStr = habitual
+      ? `John's habitual training days: ${habitual.activeDays.join(", ")} | Rest days: ${habitual.restDays.join(", ")} | High-mileage days: ${habitual.highMileageDays.join(", ")}`
+      : "";
+    const userPrompt = `JOHN'S TRAINING DATA — generate insights, not summaries. John can read his own numbers. Tell him what they mean.\n\nKEY SIGNALS:\n- Phase: ${summary.phase} | ${summary.weeksToRace} weeks to Chicago\n- ACWR: ${summary.acwr?.ratio ?? "unknown"} (${summary.acwr?.zone ?? "n/a"}) | acute ${summary.acwr?.acute ?? "?"} mi / chronic ${summary.acwr?.chronic ?? "?"} mi\n- This week: ${summary.thisWeek.miles} mi, ${summary.thisWeek.runs} runs | easy ${summary.thisWeek.easyPct}% / mod ${summary.thisWeek.moderatePct}% / hard ${summary.thisWeek.hardPct}%\n- ${intensityDistStr}\n- ${intensityStr}\n- HR trend: ${summary.hrTrendOverSeason} | Monotony: ${summary.trainingMonotony ?? "n/a"} | Aerobic efficiency: ${summary.aerobicEfficiencyTrend}\n- ${lrTrendSummary}\n- Longest run: ${summary.longestRunToDate ?? "n/a"} mi | ${summary.longRunCount} total long runs\n- Marathon prediction: ${summary.criticalPaces?.marathonPrediction ?? "unknown"} vs target 4:14:52 | Best mile: ${summary.criticalPaces?.bestMilePace ?? "n/a"}\n- ${patternStr}\n\nFULL DATA:\n${JSON.stringify(summary, null, 2)}\n\nINSIGHT RULES:\n- Today is ${summary.today}. Exact dates only.\n- Use "John" throughout — never "the athlete".\n- intensityDistribution.easyPct is the most accurate easy% figure (mile-split based). Use it, not thisWeek values, when discussing overall intensity balance.\n- Every concern and guidance item must cite specific numbers.\n- Long run quality trends (fade/drift/sigma direction) signal aerobic development — use them.\n- Quantify the gap between marathon prediction and 4:14:52 target.\n- weekPlan must use John's habitual days (trainingPatternsByDay) — don't prescribe runs on days he consistently doesn't run.\n- generatedAt must be today's ISO date.`;
 
     const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY;
 
@@ -854,7 +867,7 @@ function CoachReport({ summary }) {
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
-        max_tokens: 2500,
+        max_tokens: 3200,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
@@ -1026,7 +1039,7 @@ function CoachReport({ summary }) {
             <span style={{ color: C.red, fontSize: 24, fontWeight: 900, flexShrink: 0, lineHeight: 1.2, minWidth: 30, marginTop: 2 }}>{a.n}</span>
             <div style={{ flex: 1 }}>
               <p style={{ color: C.navy, fontWeight: 700, fontSize: 18, margin: "0 0 7px" }}>{a.title}</p>
-              <p style={{ color: "#444", fontSize: 15, lineHeight: 1.78, margin: "0 0 8px" }}>{a.body}</p>
+              <p style={{ color: "#444", fontSize: 14, lineHeight: 1.65, margin: "0 0 8px" }}>{a.body}</p>
               <p style={{ color: C.midGray, fontSize: 12, margin: 0 }}>{metaLabel}</p>
             </div>
           </div>
@@ -1034,7 +1047,7 @@ function CoachReport({ summary }) {
       </div>
 
       {data.thisWeekAction && (
-        <div style={{ background: `linear-gradient(135deg,${C.navy}06,${C.navy}02)`, border: `1px solid ${C.navy}25`, borderLeft: `5px solid ${C.navy}`, borderRadius: 8, padding: "20px 22px" }}>
+        <div style={{ background: `linear-gradient(135deg,${C.navy}06,${C.navy}02)`, border: `1px solid ${C.navy}25`, borderLeft: `5px solid ${C.navy}`, borderRadius: 8, padding: "20px 22px", marginBottom: 24 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
             <span style={{ fontSize: 22 }}>🎯</span>
             <p style={{ color: C.navy, fontWeight: 800, fontSize: 21, margin: 0, letterSpacing: "-0.01em", flex: 1 }}>This Week: One Thing to Try</p>
@@ -1043,6 +1056,48 @@ function CoachReport({ summary }) {
           <p style={{ color: "#2a2a2a", fontSize: 16, lineHeight: 1.85, margin: 0 }}>{data.thisWeekAction}</p>
         </div>
       )}
+
+      {data.weekPlan && data.weekPlan.length > 0 && (() => {
+        const typeColors = {
+          rest:    { bg: "#f5f5f5", border: C.border, label: "Rest",    dot: C.midGray },
+          easy:    { bg: C.green+"0d", border: C.green+"40", label: "Easy",    dot: C.green },
+          moderate:{ bg: C.amber+"0d", border: C.amber+"40", label: "Moderate", dot: C.amber },
+          long:    { bg: C.bofaBlue+"0d", border: C.bofaBlue+"40", label: "Long Run", dot: C.bofaBlue },
+          workout: { bg: C.red+"0d", border: C.red+"40", label: "Workout", dot: C.red },
+        };
+        return (
+          <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "20px 22px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <span style={{ fontSize: 20 }}>📅</span>
+              <p style={{ color: C.navy, fontWeight: 800, fontSize: 20, margin: 0, letterSpacing: "-0.01em" }}>Suggested Week Plan</p>
+            </div>
+            <p style={{ color: C.midGray, fontSize: 13, margin: "0 0 16px" }}>Built from John's training patterns and current data. Adjust to how you feel — HR ceiling beats pace target.</p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 8 }}>
+              {data.weekPlan.map((d, i) => {
+                const s = typeColors[d.type] || typeColors.easy;
+                return (
+                  <div key={i} style={{ background: s.bg, border: `1px solid ${s.border}`, borderRadius: 8, padding: "10px 8px", display: "flex", flexDirection: "column", gap: 4, minHeight: 110 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+                      <span style={{ color: C.navy, fontWeight: 800, fontSize: 13 }}>{d.day}</span>
+                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: s.dot, flexShrink: 0 }} />
+                    </div>
+                    <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", color: s.dot }}>{s.label}</span>
+                    <p style={{ color: C.darkGray, fontSize: 11, lineHeight: 1.4, margin: 0, flex: 1 }}>{d.description}</p>
+                    {d.rationale && <p style={{ color: C.midGray, fontSize: 10, margin: 0, lineHeight: 1.3, fontStyle: "italic" }}>{d.rationale}</p>}
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 14, marginTop: 12, flexWrap: "wrap" }}>
+              {Object.entries(typeColors).map(([k, v]) => (
+                <span key={k} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: C.midGray }}>
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: v.dot, display: "inline-block" }} />{v.label}
+                </span>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -1620,20 +1675,6 @@ export default function Dashboard() {
     })),
   [runsWithDuration]);
 
-  const trainingSummary = useMemo(() => {
-    if (!runs.length) return null;
-    return summarizeTrainingData(runs, {
-      acwr, weeklyPolarized, weeksToRace, effReg, longRuns,
-      avgHR: avgHRAll30, thisWeekMi, thisWeekRuns,
-      avgPaceFmt30, totalMi, trainingMonotony, runs,
-      weekly, longRunTrend, hrTimeReg, firstRunDate,
-      criticalPaceData, longRuns90Min, acwrHistory, crossTraining,
-    });
-  }, [runs, acwr, weeklyPolarized, weeksToRace, effReg, longRuns,
-     avgHRAll30, thisWeekMi, thisWeekRuns, avgPaceFmt30, totalMi,
-     trainingMonotony, weekly, longRunTrend, hrTimeReg, firstRunDate,
-     criticalPaceData, longRuns90Min, acwrHistory, crossTraining]);
-
   const cumulativeLoadChart = useMemo(() => {
     return weeklyLoad.map((w, i) => {
       const slice = weeklyLoad.slice(Math.max(0, i-3), i+1);
@@ -1661,6 +1702,21 @@ export default function Dashboard() {
       avgHR: b.hrRuns > 0 ? Math.round(b.totalHR/b.hrRuns) : null,
     }));
   }, [runs]);
+
+  const trainingSummary = useMemo(() => {
+    if (!runs.length) return null;
+    return summarizeTrainingData(runs, {
+      acwr, weeklyPolarized, weeksToRace, effReg, longRuns,
+      avgHR: avgHRAll30, thisWeekMi, thisWeekRuns,
+      avgPaceFmt30, totalMi, trainingMonotony, runs,
+      weekly, longRunTrend, hrTimeReg, firstRunDate,
+      criticalPaceData, longRuns90Min, acwrHistory, crossTraining,
+      dowStats,
+    });
+  }, [runs, acwr, weeklyPolarized, weeksToRace, effReg, longRuns,
+     avgHRAll30, thisWeekMi, thisWeekRuns, avgPaceFmt30, totalMi,
+     trainingMonotony, weekly, longRunTrend, hrTimeReg, firstRunDate,
+     criticalPaceData, longRuns90Min, acwrHistory, crossTraining, dowStats]);
 
   // Running Efficiency data: numbers are 3-week rolling averages to reduce noise
   const efficiencyMetrics = useMemo(() => {
