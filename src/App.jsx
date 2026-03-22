@@ -230,7 +230,19 @@ function createMileSplits(w) {
       const gct = ah.GroundContactTime   || {};
       const vo  = ah.VerticalOscillation || {};
       const sl  = ah.StrideLength        || {};
+      const sc  = ah.StepCount           || {};
       const movingSec = ms.moving_sec ?? ms.elapsed_sec ?? 0;
+
+      // Strava avg_watts is always null — use apple_health.Power.avg as the real source
+      const avgPower = (ms.avg_watts != null && ms.avg_watts > 0)
+        ? ms.avg_watts
+        : (pwr.avg != null && pwr.avg > 0 ? pwr.avg : null);
+
+      // Strava avg_cadence is always null — derive from StepCount.sum / elapsed minutes
+      const avgCadence = (ms.avg_cadence != null && ms.avg_cadence > 0)
+        ? ms.avg_cadence
+        : (sc.sum != null && movingSec > 0 ? +(sc.sum / (movingSec / 60)).toFixed(1) : null);
+
       return {
         mile:         ms.mile,
         distMiles:    ms.distance_miles ?? null,
@@ -245,7 +257,8 @@ function createMileSplits(w) {
         avgHR:    ms.avg_hr  != null ? ms.avg_hr  : (hr.avg  ?? null),
         maxHR:    hr.max  ?? null,
         minHR:    hr.min  ?? null,
-        avgPower: pwr.avg ?? null,
+        avgPower,
+        avgCadence,
         avgGCT:   gct.avg ?? null,
         avgVO:    vo.avg  ?? null,
         avgStride: sl.avg ?? null,
@@ -364,13 +377,30 @@ function transformAppleHealthData(json, debugCallback) {
 
       const avgHR             = extractAvgHR(w);
       const maxHR             = extractMaxHR(w);
-      const avgCadence        = extractCadence(w);
       const calories          = extractCalories(w);
       const elevM             = extractElevation(w);
-      const runningPower      = extractRunningPower(w);
       const groundContactTime = extractGroundContactTime(w);
       const vertOsc           = extractVerticalOscillation(w);
       const strideLen         = extractStrideLength(w);
+
+      // Cadence: prefer HK stat extractor, fall back to median of derived split cadences
+      const cadenceFromStats = extractCadence(w);
+      const avgCadence = (() => {
+        if (cadenceFromStats != null) return cadenceFromStats;
+        const splitCadences = mileSplits.map(s => s.avgCadence).filter(v => v != null && v > 100);
+        if (!splitCadences.length) return null;
+        const sorted = [...splitCadences].sort((a,b) => a-b);
+        return sorted[Math.floor(sorted.length / 2)];
+      })();
+
+      // Power: prefer HK stats extractor (whole-run avg), fall back to mean of split powers
+      const powerFromStats = extractRunningPower(w);
+      const runningPower = (() => {
+        if (powerFromStats != null) return powerFromStats;
+        const splitPowers = mileSplits.map(s => s.avgPower).filter(v => v != null && v > 0);
+        if (!splitPowers.length) return null;
+        return splitPowers.reduce((a,b) => a+b, 0) / splitPowers.length;
+      })();
 
       const indoorMeta = w.metadata?.find(m => m.key === 'HKIndoorWorkout');
       const isIndoor   = indoorMeta?.value === '1';
@@ -669,6 +699,8 @@ function summarizeTrainingData(runs, computed) {
     effortZone: r.avgHR == null ? "unknown" : r.avgHR < 152 ? "easy" : r.avgHR < 165 ? "moderate" : "hard",
     splitConsistency: r.splitConsistency ?? null,
     paceFadeSec: r.paceFadeSec != null ? +r.paceFadeSec.toFixed(1) : null,
+    avgPower: r.avgPower ? Math.round(r.avgPower) : null,
+    avgCadence: r.avgCadence ? Math.round(r.avgCadence) : null,
   }));
 
   // Recent intensity pattern: how many easy/moderate/hard in last 10 runs
@@ -784,6 +816,29 @@ function summarizeTrainingData(runs, computed) {
       raceGoal: "Finish the Chicago Marathon. Season goal: build the aerobic base so race day feels manageable.",
       seasonGoal: "Build aerobic base across 32-week Chicago build. Long run to 20–22 mi peak.",
     },
+    powerAndForm: (() => {
+      const runsWithPower    = allRuns.filter(r => r.avgPower   && r.avgPower   > 0);
+      const runsWithCadence  = allRuns.filter(r => r.avgCadence && r.avgCadence > 100);
+      if (!runsWithPower.length) return null;
+      const recent5Power    = runsWithPower.slice(-5).map(r => r.avgPower);
+      const avgRecentPower  = recent5Power.length
+        ? Math.round(recent5Power.reduce((a,b) => a+b, 0) / recent5Power.length)
+        : null;
+      const recent5Cadence  = runsWithCadence.slice(-5).map(r => r.avgCadence);
+      const avgRecentCadence = recent5Cadence.length
+        ? Math.round(recent5Cadence.reduce((a,b) => a+b, 0) / recent5Cadence.length)
+        : null;
+      return {
+        runsWithPowerData:   runsWithPower.length,
+        avgPowerLast5Runs:   avgRecentPower,
+        avgCadenceLast5Runs: avgRecentCadence,
+        cadenceNote: avgRecentCadence
+          ? (avgRecentCadence < 170
+              ? `Cadence ${avgRecentCadence} spm — below 170 spm target, consider shorter stride/higher turnover`
+              : `Cadence ${avgRecentCadence} spm — solid turnover, at or above 170 spm baseline`)
+          : null,
+      };
+    })(),
   };
 }
 
@@ -1242,30 +1297,30 @@ export default function Dashboard() {
   const thisWeekRange = `${fmtDate(thisWeekMon)} – ${fmtDate(thisWeekEndDisplay.toISOString().slice(0,10))}`;
 
   // Use workout ID in scatter to ensure uniqueness
-  const scatter     = withHR.map(d => ({ 
+  const scatter = useMemo(() => withHR.map(d => ({
     id: d.id,
-    x: d.paceSec, 
-    y: d.avgHR, 
-    date: d.date, 
-    pace: paceSecToLabel(d.paceSec), 
-    dist: kmToMi(d.dist), 
-    maxHR: d.maxHR 
-  }));
-  const regression  = linReg(scatter);
-  
-  const hrTimePts   = withHR.map((d,i) => ({ x:i, y:d.avgHR }));
-  const hrTimeReg   = linReg(hrTimePts);
-  
-  const pacTimePts  = withHR.map((d,i) => ({ x:i, y:d.paceSec }));
-  const paceTimeReg = linReg(pacTimePts);
-  
-  const hrOverTime  = withHR.map(d => ({ 
-    date: d.displayTime || d.date.slice(5), 
-    avgHR: d.avgHR, 
-    maxHR: d.maxHR, 
-    paceLabel: paceSecToLabel(d.paceSec) 
-  }));
-  
+    x: d.paceSec,
+    y: d.avgHR,
+    date: d.date,
+    pace: paceSecToLabel(d.paceSec),
+    dist: kmToMi(d.dist),
+    maxHR: d.maxHR
+  })), [withHR]);
+  const regression = useMemo(() => linReg(scatter), [scatter]);
+
+  const hrTimePts  = useMemo(() => withHR.map((d,i) => ({ x:i, y:d.avgHR })), [withHR]);
+  const hrTimeReg  = useMemo(() => linReg(hrTimePts), [hrTimePts]);
+
+  const pacTimePts  = useMemo(() => withHR.map((d,i) => ({ x:i, y:d.paceSec })), [withHR]);
+  const paceTimeReg = useMemo(() => linReg(pacTimePts), [pacTimePts]);
+
+  const hrOverTime = useMemo(() => withHR.map(d => ({
+    date: d.displayTime || d.date.slice(5),
+    avgHR: d.avgHR,
+    maxHR: d.maxHR,
+    paceLabel: paceSecToLabel(d.paceSec)
+  })), [withHR]);
+
   const hrImproving   = hrTimeReg   && hrTimeReg.slope   < -0.3;
   const paceImproving = paceTimeReg && paceTimeReg.slope < -1;
 
@@ -1273,12 +1328,12 @@ export default function Dashboard() {
   const efficiencyOverTime = useMemo(() =>
     withHR.map(d => {
       const eff = effIdx(d.paceSec, d.avgHR);
-      return eff!=null ? { 
+      return eff!=null ? {
         id: d.id,
-        date: d.displayTime || d.date.slice(5), 
-        efficiency: +eff.toFixed(3), 
+        date: d.displayTime || d.date.slice(5),
+        efficiency: +eff.toFixed(3),
         avgHR: d.avgHR,
-        pace: paceSecToLabel(d.paceSec) 
+        pace: paceSecToLabel(d.paceSec)
       } : null;
     }).filter(Boolean), [withHR]);
 
@@ -1306,8 +1361,8 @@ export default function Dashboard() {
     }).filter(Boolean);
   }, [withHR]);
 
-  const effReg       = linReg(efficiencyOverTime.map((d,i) => ({ x:i, y:d.efficiency })));
-  const gapEffReg    = linReg(gapEfficiencyOverTime.map((d,i) => ({ x:i, y:d.efficiency })));
+  const effReg    = useMemo(() => linReg(efficiencyOverTime.map((d,i) => ({ x:i, y:d.efficiency }))), [efficiencyOverTime]);
+  const gapEffReg = useMemo(() => linReg(gapEfficiencyOverTime.map((d,i) => ({ x:i, y:d.efficiency }))), [gapEfficiencyOverTime]);
   const effImproving = effReg && effReg.slope > 0.001;
 
   // Aggregated pace zones (broader categories)
@@ -1452,15 +1507,65 @@ export default function Dashboard() {
     : longRunsWithEffort.map(r => ({ ...r, trend: r.miles })),
   [longRunsWithEffort, longRunTrend]);
 
+  // TRIMP (Training Impulse) — split-level where available, whole-run fallback
+  // Formula per split: (movingSec/60) × (avgHR/150)
+  // This correctly weights hard late miles in long runs instead of blending the avg HR
+  const runTrimpData = useMemo(() => {
+    return runsWithDuration.map(r => {
+      const splits = r.splits || [];
+      const goodSplits = splits.filter(s => s.avgHR && s.movingTimeSec > 0);
+      let trimp = 0;
+      let method = 'workout-avg';
+      let splitCoveredSec = 0;
+
+      if (goodSplits.length >= 2) {
+        method = 'mile-splits';
+        goodSplits.forEach(s => {
+          trimp += (s.movingTimeSec / 60) * (s.avgHR / 150);
+          splitCoveredSec += s.movingTimeSec;
+        });
+        // Any uncovered time (e.g. partial last mile) — fall back to run avg HR
+        const remainSec = Math.max(0, (r.movingTimeSec ?? 0) - splitCoveredSec);
+        if (remainSec > 0 && r.avgHR) {
+          trimp += (remainSec / 60) * (r.avgHR / 150);
+        }
+      } else {
+        // No split HR data — use whole-run avg HR
+        trimp = r.durationMin * (r.avgHR ? (r.avgHR / 150) : 1);
+      }
+
+      // Zone distribution from splits (minutes in each HR zone)
+      const zoneMin = { easy: 0, moderate: 0, hard: 0 };
+      if (goodSplits.length >= 2) {
+        goodSplits.forEach(s => {
+          const min = s.movingTimeSec / 60;
+          if (s.avgHR < 152) zoneMin.easy += min;
+          else if (s.avgHR < 165) zoneMin.moderate += min;
+          else zoneMin.hard += min;
+        });
+      }
+
+      return {
+        date: r.date,
+        trimp: +trimp.toFixed(1),
+        method,
+        splitCount: goodSplits.length,
+        durationMin: r.durationMin,
+        avgHR: r.avgHR,
+        zoneMin,
+        miles: +kmToMi(r.dist).toFixed(1),
+      };
+    });
+  }, [runsWithDuration]);
+
   const dailyLoad = useMemo(() => {
     const byDate = {};
-    runsWithDuration.forEach(r => {
-      const load = r.durationMin * (r.avgHR ? (r.avgHR / 150) : 1);
+    runTrimpData.forEach(r => {
       if (!byDate[r.date]) byDate[r.date] = 0;
-      byDate[r.date] += load;
+      byDate[r.date] += r.trimp;
     });
     return Object.entries(byDate).sort(([a],[b]) => a.localeCompare(b));
-  }, [runsWithDuration]);
+  }, [runTrimpData]);
 
   const weeklyLoad = useMemo(() => {
     const map = {};
@@ -1504,12 +1609,13 @@ export default function Dashboard() {
   }, [weeklyLoad]);
 
   const trainingMonotony = useMemo(() => {
-    if (!runs.length) return null;
-    const dates = runs.map(r=>r.date).sort();
-    const start = new Date(dates[0]+"T12:00:00");
-    const end   = new Date(dates[dates.length-1]+"T12:00:00");
+    if (!runTrimpData.length) return null;
+    const dates = runTrimpData.map(r => r.date).sort();
+    const start = new Date(dates[0]+'T12:00:00');
+    const end   = new Date(dates[dates.length-1]+'T12:00:00');
+    // Use TRIMP by day — more accurate than raw mileage for intensity variety
     const byDate = {};
-    runs.forEach(r => { byDate[r.date] = (byDate[r.date]||0) + kmToMi(r.dist); });
+    runTrimpData.forEach(r => { byDate[r.date] = (byDate[r.date]||0) + r.trimp; });
     const allDays = [];
     const cur = new Date(start);
     while (cur <= end) {
@@ -1528,8 +1634,9 @@ export default function Dashboard() {
       const wKey  = new Date(start.getTime()+(i*864e5)).toISOString().slice(0,10);
       weeklyMonotony.push({ date: fmtDate(wKey), monotony: wStd>0 ? +(wMean/wStd).toFixed(2) : 0 });
     }
-    return { monotony, mean: +mean.toFixed(2), std: +std.toFixed(2), weeklyMonotony };
-  }, [runs]);
+    const splitCoverage = runTrimpData.filter(r => r.method === 'mile-splits').length;
+    return { monotony, mean: +mean.toFixed(1), std: +std.toFixed(1), weeklyMonotony, splitCoverage, totalRuns: runTrimpData.length };
+  }, [runTrimpData]);
 
   const polarizedDistribution = useMemo(() => {
     const buckets = [
@@ -1693,6 +1800,38 @@ export default function Dashboard() {
     });
   }, [weeklyLoad]);
 
+  // Per-week zone breakdown using split-level TRIMP — shows how load is distributed across intensities
+  const weeklyZoneLoad = useMemo(() => {
+    const byWeek = {};
+    runTrimpData.forEach(r => {
+      const mon = getMondayOf(r.date);
+      if (!byWeek[mon]) byWeek[mon] = { easy: 0, moderate: 0, hard: 0, totalTrimp: 0, splitRuns: 0, fallbackRuns: 0 };
+      byWeek[mon].easy     += r.zoneMin.easy;
+      byWeek[mon].moderate += r.zoneMin.moderate;
+      byWeek[mon].hard     += r.zoneMin.hard;
+      byWeek[mon].totalTrimp += r.trimp;
+      if (r.method === 'mile-splits') byWeek[mon].splitRuns++;
+      else byWeek[mon].fallbackRuns++;
+    });
+    return Object.entries(byWeek).sort(([a],[b]) => a.localeCompare(b)).map(([mon, d]) => {
+      const totalMin = d.easy + d.moderate + d.hard;
+      return {
+        label: fmtDate(mon),
+        monDate: mon,
+        easy:     +d.easy.toFixed(0),
+        moderate: +d.moderate.toFixed(0),
+        hard:     +d.hard.toFixed(0),
+        totalMin: +totalMin.toFixed(0),
+        totalTrimp: +d.totalTrimp.toFixed(1),
+        easyPct:     totalMin > 0 ? +(d.easy     / totalMin * 100).toFixed(0) : 0,
+        moderatePct: totalMin > 0 ? +(d.moderate / totalMin * 100).toFixed(0) : 0,
+        hardPct:     totalMin > 0 ? +(d.hard     / totalMin * 100).toFixed(0) : 0,
+        splitRuns: d.splitRuns,
+        fallbackRuns: d.fallbackRuns,
+      };
+    });
+  }, [runTrimpData]);
+
   const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
   const dowStats = useMemo(() => {
     const buckets = DAYS.map(d => ({ day:d, runs:0, miles:0, totalHR:0, hrRuns:0 }));
@@ -1777,27 +1916,92 @@ export default function Dashboard() {
     const withPower = runs.filter(r => r.avgPower && r.avgPower > 0)
       .map(r => ({
         date: r.displayTime || r.date.slice(5),
+        fullDate: r.date,
         power: r.avgPower,
         paceSec: r.paceSec,
         avgHR: r.avgHR,
+        avgCadence: r.avgCadence,
         miles: +kmToMi(r.dist).toFixed(1),
+        temperature: r.temperature,
+        runningEconomy: r.avgPower && r.dist && r.movingTimeSec > 0
+          ? +(r.avgPower / (r.dist / (r.movingTimeSec / 3600))).toFixed(2)
+          : null,
+        efficiencyIndex: r.avgPower && r.avgHR && r.paceSec
+          ? +((10000 / (r.paceSec * r.avgHR / 60)) / r.avgPower * 1000).toFixed(3)
+          : null,
       }));
     if (!withPower.length) return null;
-    
-    const powerVsHR = withPower.map(d => ({ x: d.avgHR, y: d.power, date: d.date }));
-    const powerVsPace = withPower.map(d => ({ x: d.paceSec, y: d.power, date: d.date }));
-    const powerRegHR = linReg(powerVsHR);
+
+    // Per-mile split data across all runs
+    const splitPoints = [];
+    runs.forEach(r => {
+      (r.splits || []).forEach(s => {
+        if (s.avgPower && s.avgPower > 0 && s.paceSec && s.avgHR) {
+          splitPoints.push({
+            date: r.date,
+            mile: s.mile,
+            power: Math.round(s.avgPower),
+            paceSec: s.paceSec,
+            avgHR: s.avgHR,
+            avgCadence: s.avgCadence,
+            avgGCT: s.avgGCT,
+            avgStride: s.avgStride,
+            miles: +kmToMi(r.dist).toFixed(1),
+            speedPerWatt: s.avgPower > 0 ? +((1609.344 / s.paceSec) / s.avgPower).toFixed(4) : null,
+          });
+        }
+      });
+    });
+
+    // Power fade per run (6+ mi): last mile vs first mile power
+    const powerFadeData = runs
+      .filter(r => kmToMi(r.dist) >= 6)
+      .map(r => {
+        const fullSplits = (r.splits || []).filter(s => s.avgPower && s.distMiles >= 0.85);
+        if (fullSplits.length < 3) return null;
+        const firstPow = fullSplits[0].avgPower;
+        const lastPow  = fullSplits[fullSplits.length - 1].avgPower;
+        return {
+          date: r.date,
+          miles: +kmToMi(r.dist).toFixed(1),
+          firstMilePower: Math.round(firstPow),
+          lastMilePower:  Math.round(lastPow),
+          powerFadePct: +(((lastPow - firstPow) / firstPow) * 100).toFixed(1),
+        };
+      })
+      .filter(Boolean);
+
+    const powerVsHR   = withPower.filter(d => d.avgHR).map(d => ({ x: d.avgHR,   y: d.power, date: d.date }));
+    const powerVsPace = withPower.filter(d => d.paceSec).map(d => ({ x: d.paceSec, y: d.power, date: d.date }));
+    const powerRegHR   = linReg(powerVsHR);
     const powerRegPace = linReg(powerVsPace);
-    
+    const econTrend = linReg(withPower.filter(d => d.runningEconomy).map((d,i) => ({ x:i, y:d.runningEconomy })));
+
+    // 3-run rolling avg power
+    const sortedByDate = [...withPower].sort((a,b) => a.fullDate.localeCompare(b.fullDate));
+    const rollingPower = sortedByDate.map((d,i) => {
+      const window = sortedByDate.slice(Math.max(0, i-2), i+1);
+      return { ...d, rollingPower: +(window.reduce((s,x) => s+x.power, 0) / window.length).toFixed(1) };
+    });
+
     return {
-      data: withPower,
+      data: rollingPower,
+      splitPoints,
+      powerFadeData,
       powerVsHR,
       powerVsPace,
       powerRegHR,
       powerRegPace,
-      avgPower: Math.round(withPower.reduce((s,d) => s + d.power, 0) / withPower.length),
+      econTrend,
+      avgPower: Math.round(withPower.reduce((s,d) => s+d.power, 0) / withPower.length),
       maxPower: Math.round(Math.max(...withPower.map(d => d.power))),
       minPower: Math.round(Math.min(...withPower.map(d => d.power))),
+      avgRunningEconomy: (() => {
+        const vals = withPower.filter(d => d.runningEconomy).map(d => d.runningEconomy);
+        return vals.length ? +(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2) : null;
+      })(),
+      runsWithPower: withPower.length,
+      splitCount: splitPoints.length,
     };
   }, [runs]);
 
@@ -1867,10 +2071,31 @@ export default function Dashboard() {
     const d = payload[0].payload;
     const xType = d.xType || 'hr';
     return (
-      <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:8, padding:"14px 18px", boxShadow:"0 6px 24px rgba(1,33,105,0.13)", fontFamily:F, minWidth:200 }}>
-        <p style={{ color:C.navy, fontWeight:800, fontSize:15, margin:"0 0 10px", paddingBottom:8, borderBottom:`1px solid ${C.border}` }}>{d.date}</p>
-        <Row label="Power" value={`${d.y} W`} bold color={C.red} />
-        <Row label="vs" value={xType === 'hr' ? `${d.x} bpm` : paceSecToLabel(d.x)} />
+      <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:8, padding:"12px 16px", boxShadow:"0 6px 24px rgba(1,33,105,0.13)", fontFamily:F, minWidth:190 }}>
+        <p style={{ color:C.navy, fontWeight:700, fontSize:13, margin:"0 0 8px", paddingBottom:6, borderBottom:`1px solid ${C.light}` }}>{d.date}</p>
+        <Row label="Power"  value={`${d.y} W`} bold color={C.bofaBlue} />
+        {xType === 'hr'
+          ? <Row label="Avg HR"   value={`${d.x} bpm`} />
+          : <Row label="Pace"     value={paceSecToLabel(d.x)} />}
+        {d.avgCadence && <Row label="Cadence"  value={`${Math.round(d.avgCadence)} spm`} />}
+        {d.miles      && <Row label="Distance" value={`${d.miles} mi`} />}
+        {d.speedPerWatt && <Row label="Speed/W" value={`${d.speedPerWatt} m/s/W`} />}
+      </div>
+    );
+  };
+
+  const PowerLineTip = ({ active, payload, label }) => {
+    if (!active||!payload?.length) return null;
+    const d = payload[0]?.payload || {};
+    return (
+      <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:8, padding:"12px 16px", boxShadow:"0 4px 16px rgba(1,33,105,0.1)", fontFamily:F, minWidth:180 }}>
+        <p style={{ color:C.navy, fontWeight:700, fontSize:13, margin:"0 0 8px", paddingBottom:6, borderBottom:`1px solid ${C.light}` }}>{label || d.date}</p>
+        {payload.map((p,i) => (
+          <Row key={i} label={p.name} value={`${p.value}${p.unit||""}`} color={p.color} />
+        ))}
+        {d.avgHR     && <Row label="Avg HR"   value={`${Math.round(d.avgHR)} bpm`} />}
+        {d.miles     && <Row label="Distance" value={`${d.miles} mi`} />}
+        {d.avgCadence && <Row label="Cadence" value={`${Math.round(d.avgCadence)} spm`} />}
       </div>
     );
   };
@@ -2144,43 +2369,61 @@ export default function Dashboard() {
                     </div>
 
                     <div style={{ borderTop:`1px solid ${C.light}`, paddingTop:14, marginBottom:18 }}>
-                      <p style={{ color:C.midGray, fontSize:11, fontWeight:600, letterSpacing:"0.09em", textTransform:"uppercase", margin:"0 0 8px" }}>
-                        Weekly Mileage · <span style={{ fontWeight:400 }}>hover for details</span>
-                      </p>
-                      <ResponsiveContainer width="100%" height={165}>
-                        <BarChart data={weekly} barSize={26} margin={{ top:20, right:12, bottom:2, left:0 }}>
+                      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
+                        <p style={{ color:C.midGray, fontSize:11, fontWeight:600, letterSpacing:"0.09em", textTransform:"uppercase", margin:0 }}>
+                          Weekly Mileage · <span style={{ fontWeight:400 }}>hover for details</span>
+                        </p>
+                        <div style={{ display:"flex", gap:10, fontSize:10, color:C.midGray }}>
+                          <span><span style={{ display:"inline-block", width:8, height:8, borderRadius:2, background:C.red, marginRight:4 }}/>This week</span>
+                          <span><span style={{ display:"inline-block", width:8, height:8, borderRadius:2, background:C.navy, marginRight:4 }}/>30+ mi</span>
+                          <span><span style={{ display:"inline-block", width:8, height:8, borderRadius:2, background:"#3B6FCC", marginRight:4 }}/>20–30</span>
+                          <span><span style={{ display:"inline-block", width:8, height:8, borderRadius:2, background:"#8FA8D8", marginRight:4 }}/>&lt;20</span>
+                        </div>
+                      </div>
+                      <ResponsiveContainer width="100%" height={170}>
+                        <BarChart data={weekly} barSize={24} margin={{ top:26, right:12, bottom:2, left:0 }}>
                           <defs>
+                            <linearGradient id="gCurrent" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor={C.red}     stopOpacity={1}    />
+                              <stop offset="100%" stopColor="#8B0E27" stopOpacity={0.9}  />
+                            </linearGradient>
                             <linearGradient id="gHigh" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="0%" stopColor={C.red} stopOpacity={1} />
-                              <stop offset="100%" stopColor={C.darkRed} stopOpacity={0.88} />
+                              <stop offset="0%" stopColor={C.navy}    stopOpacity={1}    />
+                              <stop offset="100%" stopColor="#001040" stopOpacity={0.85} />
                             </linearGradient>
                             <linearGradient id="gMid" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="0%" stopColor={C.navy} stopOpacity={1} />
-                              <stop offset="100%" stopColor={C.navyMid} stopOpacity={0.88} />
+                              <stop offset="0%" stopColor="#3B6FCC"   stopOpacity={1}    />
+                              <stop offset="100%" stopColor="#1A4A9E" stopOpacity={0.85} />
                             </linearGradient>
                             <linearGradient id="gLow" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="0%" stopColor="#8FA0C8" stopOpacity={1} />
-                              <stop offset="100%" stopColor="#6B7FB8" stopOpacity={0.88} />
+                              <stop offset="0%" stopColor="#8FA8D8"   stopOpacity={1}    />
+                              <stop offset="100%" stopColor="#6480B8" stopOpacity={0.85} />
                             </linearGradient>
                           </defs>
                           <CartesianGrid strokeDasharray="3 3" stroke={C.light} vertical={false} />
                           <XAxis dataKey="label" tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} axisLine={{ stroke:C.border }} tickLine={false} />
                           <YAxis tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} axisLine={false} tickLine={false} unit=" mi" width={34} />
                           <Tooltip content={<WeekTip />} cursor={{ fill:"rgba(1,33,105,0.04)", radius:4 }} />
-                          <Bar dataKey="miles" radius={[4,4,0,0]}>
-                            {weekly.map((w,i)=>(
-                              <Cell key={i} fill={w.miles>30?"url(#gHigh)":w.miles>20?"url(#gMid)":"url(#gLow)"} />
-                            ))}
+                          <Bar dataKey="miles" radius={[5,5,0,0]}>
+                            {weekly.map((w,i) => {
+                              const isCurrentWeek = i === weekly.length - 1 && weekInProgress;
+                              const fill = isCurrentWeek ? "url(#gCurrent)"
+                                : w.miles > 30 ? "url(#gHigh)"
+                                : w.miles > 20 ? "url(#gMid)"
+                                : "url(#gLow)";
+                              return <Cell key={i} fill={fill} />;
+                            })}
                             <LabelList
                               content={({ x, y, width, value, index }) => {
                                 const w = weekly[index];
-                                const pct = w?.pctChange!=null ? `${w.pctChange>0?"+":""}${w.pctChange}%` : null;
+                                const isCurrentWeek = index === weekly.length - 1 && weekInProgress;
+                                const pct = w?.pctChange != null ? `${w.pctChange > 0 ? "+" : ""}${w.pctChange}%` : null;
+                                const valColor = isCurrentWeek ? C.red : C.darkGray;
+                                const pctColor = w?.pctChange > 15 ? C.amber : w?.pctChange < -15 ? "#3B6FCC" : C.midGray;
                                 return (
                                   <g>
-                                    <text x={x+width/2} y={y-12} textAnchor="middle" fill={C.midGray} fontSize={10} fontWeight={700} fontFamily={F}>{value}</text>
-                                    {pct && <text x={x+width/2} y={y-2} textAnchor="middle"
-                                      fill={w.pctChange>15?C.amber:w.pctChange<-15?C.bofaBlue:C.midGray}
-                                      fontSize={9} fontFamily={F}>{pct}</text>}
+                                    <text x={x+width/2} y={y-14} textAnchor="middle" fill={valColor} fontSize={10} fontWeight={700} fontFamily={F}>{value}</text>
+                                    {pct && <text x={x+width/2} y={y-4} textAnchor="middle" fill={pctColor} fontSize={9} fontFamily={F}>{pct}</text>}
                                   </g>
                                 );
                               }}
@@ -2625,115 +2868,209 @@ export default function Dashboard() {
             <section style={{ marginBottom: isMob ? 32 : 48 }}>
               <SecTitle title="Load & Fatigue" color={C.navy} />
               <p style={{ color:C.midGray, fontSize:14, margin:"0 0 20px" }}>
-                Training load = duration × HR factor. ACWR compares this week's load to the rolling 4-week average. Sweet spot: 0.8–1.3.
+                TRIMP load = duration × HR intensity, computed at mile-split level where available.
+                {trainingMonotony?.splitCoverage != null && (
+                  <span style={{ color:C.bofaBlue, marginLeft:6 }}>
+                    {trainingMonotony.splitCoverage}/{trainingMonotony.totalRuns} runs using mile-level data.
+                  </span>
+                )}
               </p>
 
-              {/* Top row: ACWR score card + load chart */}
-              <div style={{ display:"grid", gridTemplateColumns: isMob ? "1fr" : "280px 1fr", gap:20, marginBottom:20 }}>
-                {/* ACWR Score */}
+              {/* Row 1: ACWR card + Stacked zone load chart */}
+              <div style={{ display:"grid", gridTemplateColumns: isMob ? "1fr" : "260px 1fr", gap:20, marginBottom:20 }}>
+
+                {/* ACWR Score card */}
                 <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
-                  <p style={{ color:C.midGray, fontSize:12, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", margin:"0 0 14px" }}>Acute:Chronic Ratio</p>
+                  <p style={{ color:C.midGray, fontSize:11, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", margin:"0 0 12px" }}>Acute:Chronic Ratio</p>
                   {acwr ? (
                     <>
                       <div style={{
-                        background:acwr.zone==="high"?"#fff0f2":acwr.zone==="caution"?"#fff8f0":"#f0fff8",
+                        background: acwr.zone==="high"?"#fff0f2":acwr.zone==="caution"?"#fff8f0":"#f0fff8",
                         border:`1px solid ${acwr.zone==="high"?C.red+"40":acwr.zone==="caution"?C.amber+"40":C.green+"40"}`,
                         borderLeft:`5px solid ${acwr.zone==="high"?C.red:acwr.zone==="caution"?C.amber:C.green}`,
-                        borderRadius:8, padding:"16px 18px", marginBottom:14,
+                        borderRadius:8, padding:"14px 16px", marginBottom:14,
                       }}>
-                        <p style={{ color:acwr.zone==="high"?C.red:acwr.zone==="caution"?C.amber:C.green, fontSize:45, fontWeight:900, margin:"0 0 4px", lineHeight:1, letterSpacing:"-0.03em" }}>{acwr.ratio}</p>
-                        <p style={{ color:C.darkGray, fontSize:15, fontWeight:600, margin:"0 0 4px" }}>
+                        <p style={{ color:acwr.zone==="high"?C.red:acwr.zone==="caution"?C.amber:C.green, fontSize:48, fontWeight:900, margin:"0 0 4px", lineHeight:1, letterSpacing:"-0.03em" }}>{acwr.ratio}</p>
+                        <p style={{ color:C.darkGray, fontSize:14, fontWeight:600, margin:"0 0 4px" }}>
                           {acwr.zone==="high"?"High risk — reduce load":acwr.zone==="caution"?"Caution — avoid big jumps":acwr.zone==="low"?"Low — room to build":"Safe zone ✓"}
                         </p>
-                        <p style={{ color:C.midGray, fontSize:13, margin:0 }}>Acute load: {acwr.acute} · Chronic: {acwr.chronic}</p>
+                        <p style={{ color:C.midGray, fontSize:12, margin:"0 0 4px" }}>Acute: {acwr.acute} · Chronic: {acwr.chronic}</p>
                       </div>
-                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, textAlign:"center" }}>
-                        {[{r:"<0.8", label:"Low", c:C.bofaBlue},{r:"0.8–1.3", label:"Optimal", c:C.green},{r:">1.3", label:"Risk", c:C.red}].map(z=>(
-                          <div key={z.r} style={{ background:C.offWhite, borderRadius:6, padding:"8px 4px", borderTop:`3px solid ${z.c}` }}>
-                            <p style={{ color:z.c, fontSize:12, fontWeight:700, margin:"0 0 2px" }}>{z.r}</p>
-                            <p style={{ color:C.midGray, fontSize:11, margin:0 }}>{z.label}</p>
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:6, textAlign:"center" }}>
+                        {[{r:"<0.8",label:"Low",c:C.bofaBlue},{r:"0.8–1.3",label:"Optimal",c:C.green},{r:">1.3",label:"Risk",c:C.red}].map(z=>(
+                          <div key={z.r} style={{ background:C.offWhite, borderRadius:6, padding:"7px 4px", borderTop:`3px solid ${z.c}` }}>
+                            <p style={{ color:z.c, fontSize:11, fontWeight:700, margin:"0 0 2px" }}>{z.r}</p>
+                            <p style={{ color:C.midGray, fontSize:10, margin:0 }}>{z.label}</p>
                           </div>
                         ))}
                       </div>
                     </>
-                  ) : <p style={{ color:C.midGray, fontSize:15 }}>Not enough data</p>}
+                  ) : <p style={{ color:C.midGray, fontSize:14 }}>Not enough data</p>}
                 </div>
 
-                {/* Weekly Load chart */}
+                {/* Stacked zone load chart — the key new view */}
                 <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
-                  <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:14 }}>
-                    <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:0 }}>Weekly Load History</p>
-                    <p style={{ color:C.midGray, fontSize:13, margin:0 }}>Bar color = load spike · Red line = 4-wk rolling avg</p>
+                  <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:10 }}>
+                    <div>
+                      <p style={{ color:C.navy, fontSize:15, fontWeight:700, margin:"0 0 2px" }}>Weekly Load by Intensity Zone</p>
+                      <p style={{ color:C.midGray, fontSize:12, margin:0 }}>Minutes of TRIMP-weighted effort per HR zone, stacked. Red line = 4-week rolling load.</p>
+                    </div>
+                    <div style={{ display:"flex", gap:10, fontSize:11, color:C.midGray, flexShrink:0 }}>
+                      <span><span style={{ display:"inline-block", width:8, height:8, borderRadius:2, background:C.green, marginRight:3 }}/>Easy</span>
+                      <span><span style={{ display:"inline-block", width:8, height:8, borderRadius:2, background:C.amber, marginRight:3 }}/>Mod</span>
+                      <span><span style={{ display:"inline-block", width:8, height:8, borderRadius:2, background:C.red, marginRight:3 }}/>Hard</span>
+                    </div>
                   </div>
-                  {acwrHistory.length>0 ? (
-                    <ResponsiveContainer width="100%" height={160}>
+                  {weeklyZoneLoad.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={170}>
+                      <ComposedChart data={weeklyZoneLoad.slice(-10)} margin={{ top:5, right:10, bottom:5, left:0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={C.light} vertical={false} />
+                        <XAxis dataKey="label" tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} axisLine={{ stroke:C.border }} tickLine={false} />
+                        <YAxis yAxisId="min" tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} axisLine={false} tickLine={false} unit=" min" width={40} />
+                        <YAxis yAxisId="trimp" orientation="right" hide />
+                        <Tooltip
+                          contentStyle={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:8, fontSize:12, fontFamily:F }}
+                          content={({ active, payload, label }) => {
+                            if (!active || !payload?.length) return null;
+                            const d = payload[0]?.payload;
+                            return (
+                              <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:8, padding:"10px 14px", fontFamily:F, minWidth:180 }}>
+                                <p style={{ color:C.navy, fontWeight:700, fontSize:13, margin:"0 0 8px", paddingBottom:6, borderBottom:`1px solid ${C.light}` }}>{label}</p>
+                                <Row label="Easy"     value={`${d?.easy ?? 0} min (${d?.easyPct ?? 0}%)`}     color={C.green} />
+                                <Row label="Moderate" value={`${d?.moderate ?? 0} min (${d?.moderatePct ?? 0}%)`} color={C.amber} />
+                                <Row label="Hard"     value={`${d?.hard ?? 0} min (${d?.hardPct ?? 0}%)`}     color={C.red} />
+                                <Row label="TRIMP"    value={`${d?.totalTrimp ?? 0}`} />
+                                {d?.splitRuns > 0 && <p style={{ color:C.bofaBlue, fontSize:11, margin:"6px 0 0" }}>{d.splitRuns} runs used mile-level data</p>}
+                              </div>
+                            );
+                          }}
+                        />
+                        <Bar yAxisId="min" dataKey="easy"     stackId="z" fill={C.green} fillOpacity={0.85} radius={[0,0,0,0]} />
+                        <Bar yAxisId="min" dataKey="moderate" stackId="z" fill={C.amber} fillOpacity={0.85} />
+                        <Bar yAxisId="min" dataKey="hard"     stackId="z" fill={C.red}   fillOpacity={0.85} radius={[3,3,0,0]} />
+                        <Line yAxisId="trimp" type="monotone" dataKey="totalTrimp" stroke={C.navy} strokeWidth={2} dot={false} strokeDasharray="4 2" />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  ) : <p style={{ color:C.midGray, fontSize:14 }}>Not enough data</p>}
+                </div>
+              </div>
+
+              {/* Row 2: Weekly TRIMP history + ACWR over time */}
+              <div style={{ display:"grid", gridTemplateColumns: isMob ? "1fr" : "1fr 1fr", gap:20, marginBottom:20 }}>
+
+                {/* Weekly TRIMP load history (was "Weekly Load History") */}
+                <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
+                  <p style={{ color:C.navy, fontSize:15, fontWeight:700, margin:"0 0 2px" }}>Weekly TRIMP Load</p>
+                  <p style={{ color:C.midGray, fontSize:12, margin:"0 0 12px" }}>Total weekly training impulse. Amber = spike ≥1.5× prior week. Red line = 4-wk avg.</p>
+                  {acwrHistory.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={155}>
                       <ComposedChart data={cumulativeLoadChart.slice(-10)} margin={{ top:5, right:10, bottom:5, left:0 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke={C.light} vertical={false} />
-                        <XAxis dataKey="label" tick={{ fontSize:11 }} axisLine={{ stroke:C.border }} tickLine={false} />
+                        <XAxis dataKey="label" tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} axisLine={{ stroke:C.border }} tickLine={false} />
                         <YAxis hide />
-                        <Tooltip contentStyle={{ fontSize:13 }} formatter={(v,n) => [n==="rolling4"?`${v} avg`:`${v} load`, n==="rolling4"?"4-wk avg":"Load"]} />
-                        <Bar dataKey="load" radius={[3,3,0,0]}>
-                          {cumulativeLoadChart.slice(-10).map((w,i)=>(<Cell key={i} fill={w.spike?C.amber:C.navy} />))}
+                        <Tooltip
+                          contentStyle={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:6, fontSize:12, fontFamily:F }}
+                          formatter={(v,n) => [n==="rolling4" ? `${v} (4-wk avg)` : `${v} TRIMP`, n==="rolling4" ? "Avg" : "Load"]}
+                        />
+                        <Bar dataKey="load" radius={[3,3,0,0]} barSize={22}>
+                          {cumulativeLoadChart.slice(-10).map((w,i) => <Cell key={i} fill={w.spike ? C.amber : C.navy} />)}
                         </Bar>
                         <Line type="monotone" dataKey="rolling4" stroke={C.red} strokeWidth={2} dot={false} />
                       </ComposedChart>
                     </ResponsiveContainer>
                   ) : <p style={{ color:C.midGray, fontSize:14 }}>Not enough data</p>}
-                  <p style={{ margin:"8px 0 0", fontSize:12, color:C.midGray }}>
-                    <span style={{ display:"inline-flex", alignItems:"center", gap:5, marginRight:12 }}><span style={{ width:10, height:10, background:C.amber, borderRadius:2, display:"inline-block" }} />Load spike (≥1.5× prior week)</span>
-                    <span style={{ display:"inline-flex", alignItems:"center", gap:5 }}><span style={{ width:16, height:2, background:C.red, display:"inline-block" }} />4-week rolling avg</span>
+                  <p style={{ margin:"8px 0 0", fontSize:11, color:C.midGray, display:"flex", gap:12, flexWrap:"wrap" }}>
+                    <span style={{ display:"inline-flex", alignItems:"center", gap:4 }}><span style={{ width:10, height:10, background:C.amber, borderRadius:2, display:"inline-block" }}/>Spike</span>
+                    <span style={{ display:"inline-flex", alignItems:"center", gap:4 }}><span style={{ width:10, height:10, background:C.navy, borderRadius:2, display:"inline-block" }}/>Normal</span>
+                    <span style={{ display:"inline-flex", alignItems:"center", gap:4 }}><span style={{ width:16, height:2, background:C.red, display:"inline-block" }}/>4-wk rolling avg</span>
                   </p>
                 </div>
-              </div>
 
-              {/* Bottom row: Monotony (left) + ACWR trend (right) */}
-              <div style={{ display:"grid", gridTemplateColumns: isMob ? "1fr" : "1fr 1fr", gap:20 }}>
+                {/* ACWR over time */}
                 <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
-                  <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:"0 0 4px" }}>Training Monotony</p>
-                  <p style={{ color:C.midGray, fontSize:13, margin:"0 0 16px" }}>Mean daily mileage ÷ std dev. Lower = more varied stimulus.</p>
-                  {trainingMonotony ? (
-                    <div>
-                      <div style={{ display:"flex", alignItems:"center", gap:16, marginBottom:16 }}>
-                        <span style={{ fontSize:53, fontWeight:900, letterSpacing:"-0.03em", color:trainingMonotony.monotony>2?C.red:trainingMonotony.monotony>1.5?C.amber:C.green, lineHeight:1 }}>
-                          {trainingMonotony.monotony}
-                        </span>
-                        <div>
-                          <p style={{ color:C.midGray, fontSize:14, margin:"0 0 4px" }}>Mean: {trainingMonotony.mean} mi/day</p>
-                          <p style={{ color:trainingMonotony.monotony<1.5?C.green:trainingMonotony.monotony<2?C.amber:C.red, fontSize:15, fontWeight:700, margin:0 }}>
-                            {trainingMonotony.monotony<1.5?"✓ Good variety":trainingMonotony.monotony<2?"Moderate — mix it up":"⚠ High monotony"}
-                          </p>
-                        </div>
-                      </div>
-                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, textAlign:"center" }}>
-                        {[{r:"<1.5", label:"Varied", c:C.green},{r:"1.5–2.0", label:"Moderate", c:C.amber},{r:">2.0", label:"Monotonous", c:C.red}].map(z=>(
-                          <div key={z.r} style={{ background:C.offWhite, borderRadius:6, padding:"8px 4px", borderTop:`3px solid ${z.c}` }}>
-                            <p style={{ color:z.c, fontSize:12, fontWeight:700, margin:"0 0 2px" }}>{z.r}</p>
-                            <p style={{ color:C.midGray, fontSize:11, margin:0 }}>{z.label}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : <p style={{ color:C.midGray, fontSize:14 }}>Not enough data</p>}
-                </div>
-
-                <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
-                  <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:"0 0 4px" }}>ACWR Over Time</p>
-                  <p style={{ color:C.midGray, fontSize:13, margin:"0 0 14px" }}>Historical ratio by week — keep under 1.3</p>
+                  <p style={{ color:C.navy, fontSize:15, fontWeight:700, margin:"0 0 2px" }}>ACWR Over Time</p>
+                  <p style={{ color:C.midGray, fontSize:12, margin:"0 0 12px" }}>Keep under 1.3. Amber = caution, red = high risk.</p>
                   {acwrHistory.length > 0 ? (
-                    <ResponsiveContainer width="100%" height={140}>
+                    <ResponsiveContainer width="100%" height={155}>
                       <BarChart data={acwrHistory.slice(-8)} margin={{ top:5, right:5, bottom:5, left:0 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke={C.light} vertical={false} />
-                        <XAxis dataKey="label" tick={{ fontSize:11 }} axisLine={{ stroke:C.border }} tickLine={false} />
-                        <YAxis hide domain={[0,2]} />
-                        <Tooltip contentStyle={{ fontSize:13 }} formatter={(v) => [`${v}`, "ACWR"]} />
-                        <Bar dataKey="acwr" radius={[3,3,0,0]}>
-                          {acwrHistory.slice(-8).map((e,i)=>(<Cell key={i} fill={e.zone==="high"?C.red:e.zone==="caution"?C.amber:C.green} />))}
+                        <XAxis dataKey="label" tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} axisLine={{ stroke:C.border }} tickLine={false} />
+                        <YAxis hide domain={[0, 2]} />
+                        <Tooltip
+                          contentStyle={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:6, fontSize:12, fontFamily:F }}
+                          formatter={v => [`${v}`, "ACWR"]}
+                        />
+                        <Bar dataKey="acwr" radius={[3,3,0,0]} barSize={22}>
+                          {acwrHistory.slice(-8).map((e,i) => <Cell key={i} fill={e.zone==="high"?C.red:e.zone==="caution"?C.amber:C.green} />)}
                         </Bar>
                         <ReferenceLine y={1.3} stroke={C.amber} strokeDasharray="4 3" label={{ value:"1.3", fill:C.amber, fontSize:11, position:"insideTopRight" }} />
-                        <ReferenceLine y={1.5} stroke={C.red} strokeDasharray="4 3" label={{ value:"1.5", fill:C.red, fontSize:11, position:"insideTopRight" }} />
+                        <ReferenceLine y={1.5} stroke={C.red}   strokeDasharray="4 3" label={{ value:"1.5", fill:C.red,   fontSize:11, position:"insideTopRight" }} />
                       </BarChart>
                     </ResponsiveContainer>
                   ) : <p style={{ color:C.midGray, fontSize:14 }}>Not enough weekly data</p>}
+                </div>
+              </div>
+
+              {/* Row 3: Monotony (upgraded) */}
+              <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
+                <div style={{ display:"grid", gridTemplateColumns: isMob ? "1fr" : "220px 1fr", gap:20, alignItems:"start" }}>
+                  <div>
+                    <p style={{ color:C.navy, fontSize:15, fontWeight:700, margin:"0 0 2px" }}>Training Monotony</p>
+                    <p style={{ color:C.midGray, fontSize:12, margin:"0 0 14px" }}>Mean daily TRIMP ÷ std dev. Lower = more varied stimulus. Now uses intensity-weighted load, not just mileage.</p>
+                    {trainingMonotony ? (
+                      <>
+                        <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:14 }}>
+                          <span style={{ fontSize:52, fontWeight:900, letterSpacing:"-0.03em", lineHeight:1,
+                            color: trainingMonotony.monotony>2?C.red:trainingMonotony.monotony>1.5?C.amber:C.green }}>
+                            {trainingMonotony.monotony}
+                          </span>
+                          <div>
+                            <p style={{ color:C.midGray, fontSize:13, margin:"0 0 3px" }}>Mean load: {trainingMonotony.mean}/day</p>
+                            <p style={{ fontSize:14, fontWeight:700, margin:"0 0 3px",
+                              color: trainingMonotony.monotony<1.5?C.green:trainingMonotony.monotony<2?C.amber:C.red }}>
+                              {trainingMonotony.monotony<1.5?"✓ Good variety":trainingMonotony.monotony<2?"Moderate — mix it up":"⚠ High monotony"}
+                            </p>
+                            {trainingMonotony.splitCoverage != null && (
+                              <p style={{ color:C.bofaBlue, fontSize:11, margin:0 }}>
+                                {trainingMonotony.splitCoverage}/{trainingMonotony.totalRuns} runs mile-level
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:6, textAlign:"center" }}>
+                          {[{r:"<1.5",label:"Varied",c:C.green},{r:"1.5–2.0",label:"Moderate",c:C.amber},{r:">2.0",label:"Monotonous",c:C.red}].map(z=>(
+                            <div key={z.r} style={{ background:C.offWhite, borderRadius:6, padding:"7px 4px", borderTop:`3px solid ${z.c}` }}>
+                              <p style={{ color:z.c, fontSize:11, fontWeight:700, margin:"0 0 2px" }}>{z.r}</p>
+                              <p style={{ color:C.midGray, fontSize:10, margin:0 }}>{z.label}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    ) : <p style={{ color:C.midGray, fontSize:14 }}>Not enough data</p>}
+                  </div>
+
+                  {/* Rolling 7-day monotony sparkline */}
+                  {trainingMonotony?.weeklyMonotony?.length > 3 && (
+                    <div>
+                      <p style={{ color:C.midGray, fontSize:12, margin:"0 0 8px" }}>7-day rolling monotony over the training block</p>
+                      <ResponsiveContainer width="100%" height={130}>
+                        <LineChart data={trainingMonotony.weeklyMonotony.slice(-12)} margin={{ top:4, right:8, bottom:4, left:0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={C.light} vertical={false} />
+                          <XAxis dataKey="date" tick={{ fill:C.midGray, fontSize:10, fontFamily:F }} axisLine={{ stroke:C.border }} tickLine={false} interval="preserveStartEnd" />
+                          <YAxis hide domain={[0, 3]} />
+                          <Tooltip contentStyle={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:6, fontSize:11, fontFamily:F }} formatter={v => [`${v}`, "Monotony"]} />
+                          <ReferenceLine y={1.5} stroke={C.amber} strokeDasharray="4 3" strokeWidth={1} />
+                          <ReferenceLine y={2.0} stroke={C.red}   strokeDasharray="4 3" strokeWidth={1} />
+                          <Line type="monotone" dataKey="monotony" stroke={C.navy} strokeWidth={2} dot={false}
+                            activeDot={{ r:4, fill:C.navy }} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                      <p style={{ color:C.midGray, fontSize:10, margin:"4px 0 0", display:"flex", gap:12 }}>
+                        <span style={{ color:C.amber }}>— 1.5 caution</span>
+                        <span style={{ color:C.red }}>— 2.0 risk</span>
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
             </section>
@@ -3628,83 +3965,156 @@ export default function Dashboard() {
               <section style={{ marginBottom: isMob ? 32 : 48 }}>
                 <SecTitle title="Running Power" color={C.bofaBlue} />
                 <p style={{ color:C.midGray, fontSize:14, margin:"0 0 16px" }}>
-                  Power output in watts. Higher power at lower HR = better efficiency.
+                  Power from Apple Watch (watts). Lower HR at same power = better aerobic efficiency over time.
+                  {powerData.splitCount > 0 && <span style={{ color:C.bofaBlue, marginLeft:6 }}>· {powerData.splitCount} mile-splits available</span>}
                 </p>
+
+                {/* ── Stat cards ── */}
+                <div style={{ display:"grid", gridTemplateColumns: isMob ? "1fr 1fr" : "repeat(4,1fr)", gap:12, marginBottom:20 }}>
+                  {[
+                    { label:"Avg Power",    value: powerData.avgPower,      unit:"W",     color:C.bofaBlue },
+                    { label:"Max Power",    value: powerData.maxPower,      unit:"W",     color:C.red      },
+                    { label:"Min Power",    value: powerData.minPower,      unit:"W",     color:C.green    },
+                    { label:"Runs w/ Data", value: powerData.runsWithPower, unit:" runs", color:C.navy     },
+                  ].map((p,i) => (
+                    <div key={i} style={{ background:C.white, border:`1px solid ${C.border}`, borderTop:`3px solid ${p.color}`, borderRadius:8, padding:"12px 14px", boxShadow:"0 1px 6px rgba(1,33,105,0.05)" }}>
+                      <p style={{ color:C.midGray, fontSize:11, letterSpacing:"0.08em", textTransform:"uppercase", margin:"0 0 6px", fontWeight:600 }}>{p.label}</p>
+                      <p style={{ color:p.color, fontSize:26, fontWeight:800, margin:0, lineHeight:1 }}>
+                        {p.value}<span style={{ fontSize:12, fontWeight:400, color:C.midGray, marginLeft:2 }}>{p.unit}</span>
+                      </p>
+                    </div>
+                  ))}
+                </div>
+
                 <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
-                  <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14, marginBottom:24 }}>
-                    {[
-                      { label:"Avg Power", value: powerData.avgPower, unit:"W", color:C.bofaBlue },
-                      { label:"Max Power", value: powerData.maxPower, unit:"W", color:C.red },
-                      { label:"Min Power", value: powerData.minPower, unit:"W", color:C.green },
-                    ].map((p,i) => (
-                      <div key={i} style={{ background:C.white, border:`1px solid ${p.color}40`, borderTop:`4px solid ${p.color}`, borderRadius:8, padding:"14px 16px", boxShadow:"0 2px 8px rgba(1,33,105,0.05)" }}>
-                        <p style={{ color:C.midGray, fontSize:12, letterSpacing:"0.1em", textTransform:"uppercase", margin:"0 0 8px", fontWeight:600 }}>{p.label}</p>
-                        <p style={{ color:p.color, fontSize:29, fontWeight:800, margin:"0 0 2px", lineHeight:1 }}>
-                          {p.value}<span style={{ fontSize:13, fontWeight:400, color:C.midGray, marginLeft:2 }}>{p.unit}</span>
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                  {/* Power over time */}
-                  <div style={{ marginBottom:24 }}>
-                    <p style={{ color:C.navy, fontSize:15, fontWeight:600, margin:"0 0 8px" }}>Power Over Time</p>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <LineChart data={powerData.data}>
+
+                  {/* ── Power over time: bars + 3-run rolling line ── */}
+                  <div style={{ marginBottom:28 }}>
+                    <p style={{ color:C.navy, fontSize:15, fontWeight:600, margin:"0 0 4px" }}>Power Over Time</p>
+                    <p style={{ color:C.midGray, fontSize:12, margin:"0 0 12px" }}>Raw power per run (bars) with 3-run rolling average (dashed line)</p>
+                    <ResponsiveContainer width="100%" height={210}>
+                      <ComposedChart data={powerData.data} margin={{ top:10, right:12, bottom:2, left:0 }}>
+                        <defs>
+                          <linearGradient id="pwrBarGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%"   stopColor={C.bofaBlue} stopOpacity={0.85} />
+                            <stop offset="100%" stopColor={C.bofaBlue} stopOpacity={0.35} />
+                          </linearGradient>
+                        </defs>
                         <CartesianGrid strokeDasharray="3 3" stroke={C.light} vertical={false} />
-                        <XAxis dataKey="date" tick={{ fontSize:12 }} axisLine={{ stroke:C.border }} tickLine={false} />
-                        <YAxis tick={{ fontSize:12 }} axisLine={false} tickLine={false} unit=" W" />
-                        <Tooltip contentStyle={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:6, fontSize:13 }} />
-                        <Line type="monotone" dataKey="power" stroke={C.bofaBlue} strokeWidth={2.5} dot={false} />
-                      </LineChart>
+                        <XAxis dataKey="date" tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} axisLine={{ stroke:C.border }} tickLine={false} />
+                        <YAxis tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} axisLine={false} tickLine={false} unit=" W" width={40} domain={['auto','auto']} />
+                        <Tooltip content={<PowerLineTip />} cursor={{ fill:"rgba(1,33,105,0.04)" }} />
+                        <Bar dataKey="power" name="Power" unit=" W" fill="url(#pwrBarGrad)" radius={[3,3,0,0]} barSize={18} />
+                        <Line type="monotone" dataKey="rollingPower" name="3-run avg" unit=" W" stroke={C.red} strokeWidth={2} dot={false} strokeDasharray="4 2" />
+                      </ComposedChart>
                     </ResponsiveContainer>
                   </div>
-                  {/* Both scatter charts always visible */}
+
+                  {/* ── Per-mile scatter: Power vs HR ── */}
+                  {powerData.splitPoints.length > 0 && (
+                    <div style={{ borderTop:`1px solid ${C.light}`, paddingTop:20, marginBottom:28 }}>
+                      <p style={{ color:C.navy, fontSize:15, fontWeight:600, margin:"0 0 4px" }}>Per-Mile: Power vs Heart Rate</p>
+                      <p style={{ color:C.midGray, fontSize:12, margin:"0 0 12px" }}>
+                        Each dot = one mile split across all runs. Same power at lower HR over time = aerobic adaptation.
+                        {powerData.powerRegHR && <span style={{ marginLeft:6 }}>R² <strong>{(powerData.powerRegHR.r2*100).toFixed(0)}%</strong></span>}
+                      </p>
+                      <ResponsiveContainer width="100%" height={210}>
+                        <ScatterChart margin={{ top:5, right:10, bottom:24, left:0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={C.light} />
+                          <XAxis type="number" dataKey="avgHR" name="HR" domain={['auto','auto']}
+                            tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} unit=" bpm"
+                            label={{ value:"Heart Rate (bpm)", position:"insideBottom", offset:-12, fill:C.midGray, fontSize:11 }} />
+                          <YAxis type="number" dataKey="power" name="Power" domain={['auto','auto']}
+                            tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} unit=" W" />
+                          <Tooltip content={<PowerScatterTip />} />
+                          <Scatter data={powerData.splitPoints.map(d => ({ ...d, x:d.avgHR, y:d.power, xType:'hr' }))} fill={C.bofaBlue} opacity={0.5} r={3} />
+                          {powerData.powerRegHR && (() => {
+                            const xs = powerData.splitPoints.map(d => d.avgHR).filter(Boolean);
+                            const xMin = Math.min(...xs), xMax = Math.max(...xs);
+                            return <Scatter
+                              data={[{x:xMin,y:powerData.powerRegHR.slope*xMin+powerData.powerRegHR.intercept},{x:xMax,y:powerData.powerRegHR.slope*xMax+powerData.powerRegHR.intercept}]}
+                              fill="none" line={{ stroke:C.red, strokeWidth:1.5, strokeDasharray:"5 3" }} shape={()=>null} legendType="none" />;
+                          })()}
+                        </ScatterChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
+
+                  {/* ── Power vs Pace + Power Fade side by side ── */}
                   <div style={{ borderTop:`1px solid ${C.light}`, paddingTop:20 }}>
-                    <div style={{ display:"grid", gridTemplateColumns: isMob ? "1fr" : "1fr 1fr", gap:20 }}>
+                    <div style={{ display:"grid", gridTemplateColumns: isMob ? "1fr" : "1fr 1fr", gap:24 }}>
+
+                      {/* Power vs Pace */}
                       <div>
-                        <p style={{ color:C.navy, fontSize:15, fontWeight:600, margin:"0 0 8px" }}>Power vs Heart Rate</p>
-                        {powerData.powerRegHR && (
-                          <p style={{ fontSize:13, color:C.midGray, marginBottom:4 }}>R² {(powerData.powerRegHR.r2*100).toFixed(0)}%</p>
-                        )}
-                        <ResponsiveContainer width="100%" height={180}>
+                        <p style={{ color:C.navy, fontSize:14, fontWeight:600, margin:"0 0 4px" }}>Power vs Pace</p>
+                        <p style={{ color:C.midGray, fontSize:12, margin:"0 0 10px" }}>
+                          Faster pace = more watts.
+                          {powerData.powerRegPace && <span style={{ marginLeft:4 }}>R² <strong>{(powerData.powerRegPace.r2*100).toFixed(0)}%</strong></span>}
+                        </p>
+                        <ResponsiveContainer width="100%" height={190}>
                           <ScatterChart margin={{ top:5, right:5, bottom:20, left:0 }}>
                             <CartesianGrid strokeDasharray="3 3" stroke={C.light} />
-                            <XAxis type="number" dataKey="x" name="HR" domain={['auto','auto']} tick={{ fontSize:11 }} unit=" bpm" />
-                            <YAxis type="number" dataKey="y" name="Power" domain={['auto','auto']} tick={{ fontSize:11 }} unit=" W" />
+                            <XAxis type="number" dataKey="x" name="Pace" domain={['auto','auto']}
+                              tick={{ fill:C.midGray, fontSize:11, fontFamily:F }}
+                              tickFormatter={v => `${Math.floor(v/60)}:${String(Math.round(v%60)).padStart(2,"0")}`} />
+                            <YAxis type="number" dataKey="y" name="Power" domain={['auto','auto']}
+                              tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} unit=" W" />
                             <Tooltip content={<PowerScatterTip />} />
-                            <Scatter data={powerData.powerVsHR.map(d => ({ ...d, xType: 'hr' }))} fill={C.bofaBlue} opacity={0.7} r={3} />
-                            {powerData.powerRegHR && (() => {
-                              const xs = powerData.powerVsHR.map(d=>d.x);
-                              const xMin = Math.min(...xs), xMax = Math.max(...xs);
-                              return <Scatter data={[{x:xMin,y:powerData.powerRegHR.slope*xMin+powerData.powerRegHR.intercept},{x:xMax,y:powerData.powerRegHR.slope*xMax+powerData.powerRegHR.intercept}]}
-                                fill="none" line={{ stroke:C.red, strokeWidth:1.5, strokeDasharray:"5 3" }} shape={()=>null} legendType="none" />;
-                            })()}
-                          </ScatterChart>
-                        </ResponsiveContainer>
-                      </div>
-                      <div>
-                        <p style={{ color:C.navy, fontSize:15, fontWeight:600, margin:"0 0 8px" }}>Power vs Pace</p>
-                        {powerData.powerRegPace && (
-                          <p style={{ fontSize:13, color:C.midGray, marginBottom:4 }}>R² {(powerData.powerRegPace.r2*100).toFixed(0)}%</p>
-                        )}
-                        <ResponsiveContainer width="100%" height={180}>
-                          <ScatterChart margin={{ top:5, right:5, bottom:20, left:0 }}>
-                            <CartesianGrid strokeDasharray="3 3" stroke={C.light} />
-                            <XAxis type="number" dataKey="x" name="Pace" domain={['auto','auto']} tick={{ fontSize:11 }} tickFormatter={v=>`${Math.floor(v/60)}:${String(v%60).padStart(2,"0")}`} />
-                            <YAxis type="number" dataKey="y" name="Power" domain={['auto','auto']} tick={{ fontSize:11 }} unit=" W" />
-                            <Tooltip content={<PowerScatterTip />} />
-                            <Scatter data={powerData.powerVsPace.map(d => ({ ...d, xType: 'pace' }))} fill={C.navy} opacity={0.7} r={3} />
+                            <Scatter
+                              data={(powerData.splitPoints.length > 0 ? powerData.splitPoints : powerData.powerVsPace)
+                                .map(d => ({ ...d, x: d.paceSec ?? d.x, y: d.power ?? d.y, xType:'pace' }))}
+                              fill={C.navy} opacity={0.5} r={3} />
                             {powerData.powerRegPace && (() => {
-                              const xs = powerData.powerVsPace.map(d=>d.x);
+                              const xs = powerData.powerVsPace.map(d => d.x);
                               const xMin = Math.min(...xs), xMax = Math.max(...xs);
-                              return <Scatter data={[{x:xMin,y:powerData.powerRegPace.slope*xMin+powerData.powerRegPace.intercept},{x:xMax,y:powerData.powerRegPace.slope*xMax+powerData.powerRegPace.intercept}]}
+                              return <Scatter
+                                data={[{x:xMin,y:powerData.powerRegPace.slope*xMin+powerData.powerRegPace.intercept},{x:xMax,y:powerData.powerRegPace.slope*xMax+powerData.powerRegPace.intercept}]}
                                 fill="none" line={{ stroke:C.red, strokeWidth:1.5, strokeDasharray:"5 3" }} shape={()=>null} legendType="none" />;
                             })()}
                           </ScatterChart>
                         </ResponsiveContainer>
                       </div>
+
+                      {/* Power Fade */}
+                      {powerData.powerFadeData.length >= 2 ? (
+                        <div>
+                          <p style={{ color:C.navy, fontSize:14, fontWeight:600, margin:"0 0 4px" }}>Power Fade (runs ≥ 6 mi)</p>
+                          <p style={{ color:C.midGray, fontSize:12, margin:"0 0 10px" }}>
+                            Last-mile vs first-mile power %. Negative = faded; positive = negative split.
+                          </p>
+                          <ResponsiveContainer width="100%" height={190}>
+                            <BarChart data={powerData.powerFadeData} margin={{ top:10, right:5, bottom:20, left:0 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke={C.light} vertical={false} />
+                              <XAxis dataKey="date" tick={{ fill:C.midGray, fontSize:10, fontFamily:F }} axisLine={{ stroke:C.border }} tickLine={false} />
+                              <YAxis tick={{ fill:C.midGray, fontSize:11, fontFamily:F }} axisLine={false} tickLine={false} unit="%" />
+                              <Tooltip
+                                contentStyle={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:6, fontSize:12, fontFamily:F }}
+                                formatter={(v) => [`${v > 0 ? "+" : ""}${v}%`, "Power fade"]}
+                                labelFormatter={v => `Run on ${v}`}
+                              />
+                              <ReferenceLine y={0} stroke={C.border} strokeWidth={1.5} />
+                              <Bar dataKey="powerFadePct" radius={[3,3,0,0]} barSize={18}>
+                                {powerData.powerFadeData.map((d,i) => (
+                                  <Cell key={i} fill={d.powerFadePct < -5 ? C.red : d.powerFadePct > 5 ? C.green : C.amber} />
+                                ))}
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                          <p style={{ color:C.midGray, fontSize:11, margin:"4px 0 0", textAlign:"center" }}>
+                            <span style={{ color:C.red }}>■</span> Faded &nbsp;
+                            <span style={{ color:C.amber }}>■</span> Held &nbsp;
+                            <span style={{ color:C.green }}>■</span> Negative split
+                          </p>
+                        </div>
+                      ) : (
+                        <div style={{ display:"flex", alignItems:"center", justifyContent:"center", color:C.midGray, fontSize:13 }}>
+                          Need ≥ 2 runs of 6+ mi for power fade chart
+                        </div>
+                      )}
+
                     </div>
                   </div>
+
                 </div>
               </section>
             )}
