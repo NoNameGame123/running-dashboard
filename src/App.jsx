@@ -2144,51 +2144,6 @@ export default function Dashboard() {
   return (
     <div style={{ minHeight:"100vh", background:C.offWhite, fontFamily:F, color:C.darkGray, fontSize: isMob ? 14 : 15, overflowX:"hidden" }}>
 
-      {/* ── Debug overlay ── tap the button to expand, shows fetch + parse log */}
-      <div style={{ position:"fixed", bottom:16, right:16, zIndex:9999 }}>
-        <button
-          onClick={() => setShowDebug(d => !d)}
-          style={{
-            background: debugLog.some(l=>l.type==="error") ? C.red : debugLog.some(l=>l.type==="warn") ? C.amber : C.navy,
-            color: C.white, border:"none", borderRadius:8, padding:"8px 14px",
-            fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:F,
-            boxShadow:"0 4px 16px rgba(0,0,0,0.3)",
-          }}
-        >
-          {showDebug ? "Hide Debug" : `🔍 Debug ${debugLog.some(l=>l.type==="error")?"❌":debugLog.some(l=>l.type==="warn")?"⚠️":"✓"}`}
-        </button>
-        {showDebug && (
-          <div style={{
-            position:"absolute", bottom:44, right:0, width: isMob ? "calc(100vw - 32px)" : 480,
-            background:"#0d1117", border:"1px solid #30363d", borderRadius:10,
-            padding:"14px 16px", boxShadow:"0 8px 32px rgba(0,0,0,0.5)",
-            maxHeight:"60vh", overflowY:"auto",
-          }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, borderBottom:"1px solid #30363d", paddingBottom:8 }}>
-              <p style={{ color:"#e6edf3", fontSize:13, fontWeight:700, margin:0 }}>Fetch Debug Log</p>
-              <div style={{ display:"flex", gap:8 }}>
-                <span style={{ color:"#8b949e", fontSize:11 }}>runs: {raw.length} | cross-training: {crossTraining.length}</span>
-                <button onClick={() => { setDebugLog([]); fetchData(true); }}
-                  style={{ background:"#21262d", color:"#58a6ff", border:"1px solid #30363d", borderRadius:4, padding:"2px 8px", fontSize:11, cursor:"pointer", fontFamily:F }}>
-                  Retry
-                </button>
-              </div>
-            </div>
-            {debugLog.length === 0
-              ? <p style={{ color:"#8b949e", fontSize:12, margin:0 }}>No log entries yet.</p>
-              : debugLog.map((l, i) => (
-                <div key={i} style={{ display:"flex", gap:8, marginBottom:4, alignItems:"flex-start" }}>
-                  <span style={{ color:"#8b949e", fontSize:10, flexShrink:0, marginTop:2 }}>{l.ts}</span>
-                  <span style={{
-                    fontSize:12, lineHeight:1.5, wordBreak:"break-all",
-                    color: l.type==="error" ? "#ff7b72" : l.type==="warn" ? "#e3b341" : l.type==="ok" ? "#3fb950" : "#e6edf3",
-                  }}>{l.msg}</span>
-                </div>
-              ))
-            }
-          </div>
-        )}
-      </div>
       <header style={{ position:"relative", overflow:"hidden" }}>
         <div style={{ position:"absolute", inset:0 }}>
           <img src={CHICAGO_BG} alt="Chicago skyline" style={{ width:"100%", height:"100%", objectFit:"cover", objectPosition:"center 30%" }} />
