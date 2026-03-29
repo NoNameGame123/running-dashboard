@@ -484,6 +484,16 @@ const MARATHON_QUOTES = [
   { q:"Your legs will forgive you. Eventually. Probably by Thursday.", a:"Recovery Science" },
   { q:"A marathon is just a long run. A long run is just a medium run but longer. A medium run is just a short run but more. You see where this is going.", a:"Reductionism" },
   { q:"The toenail situation is temporary. The finishing medal is forever.", a:"Marathon Economics" },
+  { q:"You are essentially doing the same thing as a horse, but slower and with more podcasts.", a:"Comparative Zoology" },
+  { q:"Every runner is just a person who hasn't quit yet. Today, that's you. Well done.", a:"Participation Trophy Science" },
+  { q:"Carb-loading is the one time in life where eating a second bowl of pasta is a medical decision.", a:"Sports Nutrition" },
+  { q:"Your future self, crossing that finish line, is counting on your current self to keep logging the boring miles.", a:"Temporal Fitness Theory" },
+  { q:"Mile 18 of a marathon is just mile 1 of a different, worse marathon.", a:"Advanced Running Math" },
+  { q:"The only bad long run is the one you didn't go on. Unless you got injured. Then it's that one.", a:"Running Proverbs" },
+  { q:"Strava is just a social network where everyone is slightly lying about how they feel.", a:"Digital Wellness" },
+  { q:"You don't need to love running. You just need to do it more than you hate it.", a:"Threshold Theory" },
+  { q:"The race is long. Also it is literally a race. A long one.", a:"Chicago Marathon Official Preview" },
+  { q:"Chicago in October: 40,000 runners, one finish line, infinite deep dish regrets. Worth it.", a:"The City of Broad Shoulders" },
 ];
 function getTodayQuote() {
   return MARATHON_QUOTES[Math.floor(Date.now()/864e5) % MARATHON_QUOTES.length];
@@ -1186,6 +1196,7 @@ export default function Dashboard() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [vo2MaxData, setVo2MaxData] = useState([]);
   const [afpMode, setAfpMode] = useState('gap');
+  const [scatterView, setScatterView] = useState('all');
   const [patView, setPatView] = useState('dow');
   const [econView, setEconView] = useState('rolling');
   const [longRunView, setLongRunView] = useState('chart');
@@ -1374,18 +1385,20 @@ export default function Dashboard() {
       return +(sorted.reduce((s,v)=>s+v,0)/sorted.length).toFixed(1);
     };
     const now = new Date(TODAY);
-    const ms4w = 4*7*864e5, ms8w = 8*7*864e5;
-    const recentCut = new Date(now.getTime() - ms4w);
-    const priorCut  = new Date(now.getTime() - ms8w);
+    const ms5w = 5*7*864e5, ms10w = 10*7*864e5;
+    const recentCut = new Date(now.getTime() - ms5w);
+    const priorCut  = new Date(now.getTime() - ms10w);
     const recentAll = withHR.filter(d => new Date(d.date+"T12:00:00") >= recentCut);
     const earlyAll  = withHR.filter(d => { const dt=new Date(d.date+"T12:00:00"); return dt>=priorCut && dt<recentCut; });
 
-    // Define broader zones
+    // Define 30-second pace zones: sub 8:30 then 8:30–11:00 in 30s bands
     const broadZones = [
-      { id: "sub9", label: "Sub 9:00",   min: 0,   max: 540 }, // up to 9:00
-      { id: "9to10", label: "9:00–10:00", min: 540, max: 600 },
-      { id: "10to11", label: "10:00–11:00", min: 600, max: 660 },
-      { id: "11plus", label: "11:00+",   min: 660, max: 9999 },
+      { id: "sub830",    label: "Sub 8:30",     min:   0, max: 510 },
+      { id: "830to9",    label: "8:30–9:00",    min: 510, max: 540 },
+      { id: "9to930",    label: "9:00–9:30",    min: 540, max: 570 },
+      { id: "930to10",   label: "9:30–10:00",   min: 570, max: 600 },
+      { id: "10to1030",  label: "10:00–10:30",  min: 600, max: 630 },
+      { id: "1030to11",  label: "10:30–11:00",  min: 630, max: 660 },
     ];
 
     return broadZones.map(z => {
@@ -1432,15 +1445,17 @@ export default function Dashboard() {
       return { ...r, paceSec: adjPace };
     });
     const now = new Date(TODAY);
-    const recentCut = new Date(now.getTime() - 4*7*864e5);
-    const priorCut  = new Date(now.getTime() - 8*7*864e5);
+    const recentCut = new Date(now.getTime() - 5*7*864e5);
+    const priorCut  = new Date(now.getTime() - 10*7*864e5);
     const recentAll = adjusted.filter(d => new Date(d.date+"T12:00:00") >= recentCut);
     const earlyAll  = adjusted.filter(d => { const dt=new Date(d.date+"T12:00:00"); return dt>=priorCut && dt<recentCut; });
     return [
-      { id:"sub9",   label:"Sub 9:00",    min:0,   max:540  },
-      { id:"9to10",  label:"9:00–10:00",  min:540, max:600  },
-      { id:"10to11", label:"10:00–11:00", min:600, max:660  },
-      { id:"11plus", label:"11:00+",      min:660, max:9999 },
+      { id:"sub830",    label:"Sub 8:30",    min:  0, max:510 },
+      { id:"830to9",    label:"8:30–9:00",   min:510, max:540 },
+      { id:"9to930",    label:"9:00–9:30",   min:540, max:570 },
+      { id:"930to10",   label:"9:30–10:00",  min:570, max:600 },
+      { id:"10to1030",  label:"10:00–10:30", min:600, max:630 },
+      { id:"1030to11",  label:"10:30–11:00", min:630, max:660 },
     ].map(z => {
       const inZone = arr => arr.filter(d => d.paceSec >= z.min && d.paceSec < z.max);
       const earlyR = inZone(earlyAll), recentR = inZone(recentAll);
@@ -1456,7 +1471,7 @@ export default function Dashboard() {
     return { ...r, durationMin: sec != null ? sec / 60 : null };
   }).filter(r => r.durationMin != null), [runs]);
 
-  const longRunMiles = 8;
+  const longRunMiles = 9;
   const longRuns = useMemo(() => runsWithDuration
     .filter(r => kmToMi(r.dist) >= longRunMiles || r.durationMin >= 90)
     .map(r => {
@@ -2736,7 +2751,7 @@ export default function Dashboard() {
                   <div style={{ marginBottom:20 }}>
                   <div style={{ marginBottom:10 }}>
                     <p style={{ color:C.midGray, fontSize:13, margin:"0 0 3px" }}>
-                      <strong style={{ color:C.navy }}>HR at Equivalent Paces</strong> · Prior 4 weeks → Recent 4 weeks · <span style={{ color:C.green }}>green = HR dropped (fitness gained)</span>
+                      <strong style={{ color:C.navy }}>HR at Equivalent Paces</strong> · Prior 5 weeks → Recent 5 weeks · <span style={{ color:C.green }}>green = HR dropped (fitness gained)</span>
                     </p>
                     {afpMode==='gap' && (
                       <p style={{ color:C.midGray, fontSize:12, margin:0, fontStyle:"italic" }}>
@@ -2744,28 +2759,28 @@ export default function Dashboard() {
                       </p>
                     )}
                   </div>
-                  <div style={{ display:"grid", gridTemplateColumns: isMob ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:12 }}>
-                    {zones.filter(z=>z.earlyN>0||z.lateN>0).map(z => {
+                  <div style={{ display:"grid", gridTemplateColumns: isMob ? "repeat(2,1fr)" : "repeat(3,1fr)", gap:10 }}>
+                    {zones.map(z => {
                       const borderColor = z.delta != null && z.delta < 0 ? C.green : z.delta != null && z.delta > 0 ? C.amber : C.border;
                       return (
                         <div key={z.id} style={{
                           background:C.white, border:`1px solid ${borderColor}`,
                           borderTop:`4px solid ${borderColor}`,
-                          borderRadius:8, padding:"16px 18px",
+                          borderRadius:8, padding:"12px 14px",
                           boxShadow:"0 2px 8px rgba(1,33,105,0.07)",
                         }}>
-                          <p style={{ color:C.midGray, fontSize:12, fontWeight:700, letterSpacing:"0.07em", textTransform:"uppercase", margin:"0 0 10px" }}>{z.label}</p>
-                          <div style={{ display:"flex", alignItems:"baseline", gap:6 }}>
-                            <span style={{ color:C.midGray, fontSize:16, fontWeight:500 }}>{z.earlyHR ?? "—"}</span>
-                            <span style={{ color:C.midGray, fontSize:14 }}>→</span>
-                            <span style={{ color:z.delta!=null&&z.delta<0?C.green:z.delta!=null&&z.delta>0?C.red:C.navy, fontSize:27, fontWeight:800, lineHeight:1 }}>{z.lateHR ?? "—"}</span>
+                          <p style={{ color:C.midGray, fontSize:11, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", margin:"0 0 8px", whiteSpace:"nowrap" }}>{z.label}</p>
+                          <div style={{ display:"flex", alignItems:"baseline", gap:4 }}>
+                            <span style={{ color:C.midGray, fontSize:14, fontWeight:500 }}>{z.earlyHR ?? "—"}</span>
+                            <span style={{ color:C.midGray, fontSize:12 }}>→</span>
+                            <span style={{ color:z.delta!=null&&z.delta<0?C.green:z.delta!=null&&z.delta>0?C.red:C.navy, fontSize:24, fontWeight:800, lineHeight:1 }}>{z.lateHR ?? "—"}</span>
                           </div>
-                          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginTop:6 }}>
-                            <span style={{ fontSize:14, fontWeight:700, color:z.delta<0?C.green:z.delta>0?C.red:C.midGray }}>
+                          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginTop:5 }}>
+                            <span style={{ fontSize:13, fontWeight:700, color:z.delta<0?C.green:z.delta>0?C.red:C.midGray }}>
                               {z.delta!=null ? (z.delta<0?`${z.delta} bpm`:`+${z.delta} bpm`) : ""}
                             </span>
-                            <span style={{ color:C.midGray, fontSize:11 }}>
-                              {z.earlyN>0?`${z.earlyN}`:"-"} / {z.lateN>0?`${z.lateN}`:"-"} runs
+                            <span style={{ color:C.midGray, fontSize:10 }}>
+                              {z.earlyN>0?`${z.earlyN}`:"-"}/{z.lateN>0?`${z.lateN}`:"-"}
                             </span>
                           </div>
                         </div>
@@ -2828,15 +2843,53 @@ export default function Dashboard() {
 
                   <div>
                     <div style={{ marginBottom:12 }}>
-                      <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:"0 0 3px" }}>HR vs Pace Scatter</p>
-                      <p style={{ color:C.midGray, fontSize:13, margin:"0 0 8px", lineHeight:1.5 }}>Each dot = one run. A downward shift over time signals aerobic gains.</p>
-                      {regression && (
+                      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", flexWrap:"wrap", gap:8, marginBottom:6 }}>
+                        <div>
+                          <p style={{ color:C.navy, fontSize:16, fontWeight:700, margin:"0 0 3px" }}>HR vs Pace Scatter</p>
+                          <p style={{ color:C.midGray, fontSize:13, margin:0, lineHeight:1.5 }}>
+                            {scatterView === 'all'
+                              ? "Every HR-tracked run, all season. Lower HR at same pace = aerobic gains."
+                              : "Dots colored by time period. Blue = early season → green = recent. A downward shift signals fitness gains."}
+                          </p>
+                        </div>
+                        <div style={{ display:"flex", gap:0, border:`1px solid ${C.border}`, borderRadius:6, overflow:"hidden", flexShrink:0 }}>
+                          {[{id:'all',label:'All Runs'},{id:'time',label:'Over Time'}].map((v,i) => (
+                            <button key={v.id} onClick={() => setScatterView(v.id)} style={{
+                              padding:"5px 12px", fontSize:12, fontWeight:600, cursor:"pointer", whiteSpace:"nowrap",
+                              background: scatterView===v.id ? C.navy : C.white,
+                              color: scatterView===v.id ? C.white : C.midGray,
+                              border:"none", borderLeft: i>0 ? `1px solid ${C.border}` : "none", fontFamily:F,
+                            }}>{v.label}</button>
+                          ))}
+                        </div>
+                      </div>
+                      {scatterView === 'all' && regression && (
                         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
                           <span style={{ fontSize:13, color:C.midGray }}>Correlation R²</span>
                           <span style={{ fontSize:14, fontWeight:700, color:regression.r2>0.6?C.green:regression.r2>0.3?C.amber:C.midGray }}>{(regression.r2*100).toFixed(0)}%</span>
                           <span style={{ fontSize:13, color:C.midGray }}>· {regression.r2>0.6?"Strong":regression.r2>0.3?"Moderate":"Weak"}</span>
                         </div>
                       )}
+                      {scatterView === 'time' && (() => {
+                        // Build time-bucketed legend
+                        const n = scatter.length;
+                        const q = Math.floor(n / 4);
+                        return (
+                          <div style={{ display:"flex", gap:12, flexWrap:"wrap" }}>
+                            {[
+                              { label:"Early season", color:"#3B6FCC" },
+                              { label:"Mid-early",    color:"#2E9FA0" },
+                              { label:"Mid-recent",   color:"#5AB85A" },
+                              { label:"Recent",       color:C.green   },
+                            ].map(b => (
+                              <span key={b.label} style={{ display:"flex", alignItems:"center", gap:5, fontSize:11, color:C.midGray }}>
+                                <span style={{ width:9, height:9, borderRadius:"50%", background:b.color, display:"inline-block", opacity:0.85 }} />
+                                {b.label}
+                              </span>
+                            ))}
+                          </div>
+                        );
+                      })()}
                     </div>
                     <ResponsiveContainer width="100%" height={210}>
                       <ScatterChart margin={{ top:8, right:8, bottom:22, left:0 }}>
@@ -2848,12 +2901,49 @@ export default function Dashboard() {
                         <YAxis type="number" dataKey="y" name="Avg HR" domain={["auto","auto"]}
                           tick={{ fill:C.midGray, fontSize:11 }} width={30} />
                         <Tooltip content={<ScatterTip />} />
-                        <Scatter data={scatter} fill={C.navy} opacity={0.7} r={4} />
-                        {regression && (() => {
-                          const xs=scatter.map(d=>d.x);
-                          const xMin=Math.min(...xs), xMax=Math.max(...xs);
-                          return <Scatter data={[{x:xMin,y:regression.slope*xMin+regression.intercept},{x:xMax,y:regression.slope*xMax+regression.intercept}]}
-                            fill="none" line={{ stroke:C.red, strokeWidth:1.5, strokeDasharray:"5 3" }} shape={()=>null} legendType="none" />;
+                        {scatterView === 'all' ? (
+                          <>
+                            <Scatter data={scatter} fill={C.navy} opacity={0.7} r={4} />
+                            {regression && (() => {
+                              const xs=scatter.map(d=>d.x);
+                              const xMin=Math.min(...xs), xMax=Math.max(...xs);
+                              return <Scatter data={[{x:xMin,y:regression.slope*xMin+regression.intercept},{x:xMax,y:regression.slope*xMax+regression.intercept}]}
+                                fill="none" line={{ stroke:C.red, strokeWidth:1.5, strokeDasharray:"5 3" }} shape={()=>null} legendType="none" />;
+                            })()}
+                          </>
+                        ) : (() => {
+                          // Color dots by temporal quartile — earliest = dark blue, latest = green
+                          const n = scatter.length;
+                          const QUARTILE_COLORS = ["#3B6FCC","#2E9FA0","#5AB85A",C.green];
+                          const q = Math.ceil(n / 4);
+                          const buckets = [0,1,2,3].map(i => ({
+                            color: QUARTILE_COLORS[i],
+                            data: scatter.slice(i*q, (i+1)*q),
+                          }));
+                          // Compute global x extent for trend lines
+                          const allXs = scatter.map(d => d.x);
+                          const xMin = Math.min(...allXs), xMax = Math.max(...allXs);
+                          return buckets.flatMap((b, i) => {
+                            const dots = <Scatter key={`dots-${i}`} data={b.data} fill={b.color} opacity={0.8} r={4} />;
+                            const reg = linReg(b.data.map(d => ({ x: d.x, y: d.y })));
+                            if (!reg || b.data.length < 3) return [dots];
+                            // Clamp trend line to the x range of this bucket's data
+                            const bxs = b.data.map(d => d.x);
+                            const bxMin = Math.min(...bxs), bxMax = Math.max(...bxs);
+                            const trendLine = (
+                              <Scatter key={`trend-${i}`}
+                                data={[
+                                  { x: bxMin, y: reg.slope * bxMin + reg.intercept },
+                                  { x: bxMax, y: reg.slope * bxMax + reg.intercept },
+                                ]}
+                                fill="none"
+                                line={{ stroke: b.color, strokeWidth: 2, strokeDasharray: "5 3" }}
+                                shape={() => null}
+                                legendType="none"
+                              />
+                            );
+                            return [dots, trendLine];
+                          });
                         })()}
                       </ScatterChart>
                     </ResponsiveContainer>
@@ -3099,8 +3189,8 @@ export default function Dashboard() {
                   const trend = vo2MaxData.length < 2 ? "→ stable"
                     : delta > 1 ? "↑ improving" : delta < -1 ? "↓ declining" : "→ stable";
                   const trendColor = trend.includes("↑") ? C.green : trend.includes("↓") ? C.amber : C.midGray;
-                  // Build recent-only sparkline: last 10 readings with tight y-domain
-                  const sparkData = vo2MaxData.slice(-10);
+                  // Build all-time trend sparkline with tight y-domain
+                  const sparkData = vo2MaxData;
                   const sparkVals = sparkData.map(d => d.vo2max).filter(Boolean);
                   const sparkMin = sparkVals.length ? +(Math.min(...sparkVals) - 0.5).toFixed(1) : "auto";
                   const sparkMax = sparkVals.length ? +(Math.max(...sparkVals) + 0.5).toFixed(1) : "auto";
@@ -3135,7 +3225,7 @@ export default function Dashboard() {
                       {sparkData.length > 2 && (
                         <div style={{ flex:1, minWidth:160 }}>
                           <p style={{ color:C.midGray, fontSize:10, fontWeight:600, letterSpacing:"0.08em", textTransform:"uppercase", margin:"0 0 4px" }}>
-                            Last {sparkData.length} readings
+                            All-time trend ({sparkData.length} readings)
                           </p>
                           <ResponsiveContainer width="100%" height={52}>
                             <LineChart data={sparkData} margin={{ top:4, right:8, bottom:4, left:0 }}>
@@ -3242,7 +3332,7 @@ export default function Dashboard() {
             <section style={{ marginBottom: isMob ? 32 : 48 }}>
               <SecTitle title="Long Run Tracker" color={C.navy} />
               <p style={{ color:C.midGray, fontSize:14, margin:"0 0 16px" }}>
-                Long runs defined as ≥8 miles or ≥90 minutes. Splits from Strava — pace and HR at every mile.
+                Long runs defined as ≥9 miles or ≥90 minutes. Splits from Strava — pace and HR at every mile.
               </p>
               <div style={{ background:C.white, border:`1px solid ${C.border}`, borderRadius:10, padding:card, boxShadow:"0 2px 12px rgba(1,33,105,0.06)" }}>
 
@@ -3258,7 +3348,7 @@ export default function Dashboard() {
                     ? +(runsWithSplitConsistency.reduce((s,r) => s+r.splitConsistency, 0) / runsWithSplitConsistency.length).toFixed(1)
                     : null;
                   const stats = [
-                    { label:"Total Long Runs", value:longRuns.length, unit:"", sub:"≥8 mi or ≥90 min", color:C.navy, accent:C.navy },
+                    { label:"Total Long Runs", value:longRuns.length, unit:"", sub:"≥9 mi or ≥90 min", color:C.navy, accent:C.navy },
                     { label:"Longest Run", value:longest.miles.toFixed(1), unit:" mi", sub:fmtDate(longest.date), color:C.red, accent:C.red },
                     { label:"Last Long Run", value:last.miles.toFixed(1), unit:" mi", sub:`${fmtDate(last.date)} · ${last.paceLabel}/mi`, color:C.bofaBlue, accent:C.bofaBlue },
                     avgSplitConsistency != null
@@ -3502,35 +3592,6 @@ export default function Dashboard() {
                           </div>
                         );
                       })()}
-
-                      {/* Split consistency over time */}
-                      {trendData.filter(d => d.sigma != null).length >= 3 && (
-                        <div style={{ marginBottom:16 }}>
-                          <p style={{ color:C.navy, fontSize:13, fontWeight:700, margin:"0 0 6px" }}>
-                            Pacing Consistency (σ) <span style={{ color:C.midGray, fontWeight:400, fontSize:12 }}>std dev of mile paces — lower is more even</span>
-                          </p>
-                          <ResponsiveContainer width="100%" height={110}>
-                            <ComposedChart data={trendData.filter(d => d.sigma != null)} margin={{ top:4, right:8, bottom:16, left:0 }}>
-                              <CartesianGrid strokeDasharray="3 3" stroke={C.light} vertical={false} />
-                              <XAxis dataKey="date" tick={{ fill:C.midGray, fontSize:10 }} axisLine={false} tickLine={false} />
-                              <YAxis tick={{ fill:C.midGray, fontSize:10 }} unit="s" axisLine={false} tickLine={false} width={28} domain={[0,"auto"]} />
-                              <ReferenceLine y={20} stroke={C.green} strokeDasharray="3 2" label={{ value:"20s", fill:C.green, fontSize:9, position:"insideTopRight" }} />
-                              <ReferenceLine y={40} stroke={C.amber} strokeDasharray="3 2" label={{ value:"40s", fill:C.amber, fontSize:9, position:"insideTopRight" }} />
-                              <Tooltip
-                                contentStyle={{ fontSize:12, padding:"6px 10px" }}
-                                formatter={(v) => [`±${v}s/mi`, "Split σ"]}
-                                labelFormatter={(_, p) => p?.[0]?.payload?.fullDate ?? ""}
-                              />
-                              <Bar dataKey="sigma" radius={[3,3,0,0]} barSize={18}>
-                                {trendData.filter(d => d.sigma != null).map((e,i) => (
-                                  <Cell key={i} fill={e.sigma < 20 ? C.green : e.sigma < 40 ? C.amber : C.red} />
-                                ))}
-                              </Bar>
-                              <Line type="monotone" dataKey="sigma" stroke={C.navy} strokeWidth={1.5} dot={false} strokeDasharray="4 2" connectNulls />
-                            </ComposedChart>
-                          </ResponsiveContainer>
-                        </div>
-                      )}
 
                       {/* Run-by-run summary table */}
                       <div style={{ overflowX:"auto" }}>
@@ -4508,7 +4569,7 @@ export default function Dashboard() {
                     <tbody>
                       {sorted.map((r, i) => {
                         const mi = kmToMi(r.dist).toFixed(2);
-                        const isLong = kmToMi(r.dist) >= 8;
+                        const isLong = kmToMi(r.dist) >= 9;
                         return (
                           <tr key={r.id || r.date+i}
                             style={{ borderBottom:`1px solid ${C.light}`, background:i%2===0?C.white:C.offWhite, transition:"background 0.1s" }}
