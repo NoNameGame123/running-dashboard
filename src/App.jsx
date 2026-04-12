@@ -4652,4 +4652,4 @@ function Row({ label, value, bold, color }) {
       <span style={{ color:color||C.darkGray, fontSize:14, fontWeight:bold?700:400 }}>{value}</span>
     </div>
   );
-}
+} 
